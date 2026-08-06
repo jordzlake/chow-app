@@ -155,7 +155,9 @@ input {
   height: 100dvh;
   min-height: 100svh;
   overflow: hidden;
-  background: linear-gradient(180deg, #ffd84d 0%, var(--sun) 46%, var(--sea) 100%);
+  /* first-paint fallback only; the canvas paints the live sky, which starts
+     blue and shifts hue every 50 points until it reaches yellow at 1500 */
+  background: linear-gradient(180deg, hsl(215, 74%, 73%) 0%, hsl(225, 78%, 63%) 52%, hsl(257, 55%, 48%) 100%);
   touch-action: none;
   user-select: none;
 }

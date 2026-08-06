@@ -3,25 +3,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-/* Smaller fruit is worth more. `unlock` is how many catches it takes before
-   that size joins the mix, so the drop pool gets finer as the run goes on. */
+/* Smaller fruit is worth more. `unlock` is the score at which that size joins
+   the pool, so the drop mix widens as the run goes rather than all at once.
+   Colours are HSL so each drop can jitter its own hue slightly. */
 const FRUITS = [
-  { key: "grapefruit", scale: 1.3, points: 5, flesh: "#ff5e5b", skin: "#c93a37", unlock: 0, weight: 2 },
-  { key: "orange", scale: 1.0, points: 10, flesh: "#ff8a1e", skin: "#d96a00", unlock: 0, weight: 4 },
-  { key: "lemon", scale: 0.86, points: 15, flesh: "#ffd500", skin: "#d9a900", unlock: 6, weight: 3 },
-  { key: "lime", scale: 0.66, points: 30, flesh: "#7cb518", skin: "#5d8c0e", unlock: 14, weight: 3 },
-  { key: "kumquat", scale: 0.46, points: 60, flesh: "#ffa41e", skin: "#d97a00", unlock: 26, weight: 2 },
+  { key: "grapefruit", scale: 1.3, points: 5, hue: 2, sat: 78, light: 60, unlock: 0, weight: 3 },
+  { key: "orange", scale: 1.0, points: 10, hue: 28, sat: 96, light: 55, unlock: 0, weight: 4 },
+  { key: "lemon", scale: 0.86, points: 15, hue: 50, sat: 100, light: 52, unlock: 150, weight: 3 },
+  { key: "lime", scale: 0.66, points: 30, hue: 82, sat: 72, light: 44, unlock: 500, weight: 3 },
+  { key: "kumquat", scale: 0.46, points: 60, hue: 33, sat: 100, light: 56, unlock: 900, weight: 2 },
 ];
 
 const POWERS = {
-  mango: { label: "Catch all", seconds: 5, color: "#ff8a1e" },
-  speed: { label: "Quick hands", seconds: 5, color: "#ffd500" },
-  shield: { label: "Shield", seconds: 3, color: "#17a9a0" },
-  bowl: { label: "Fruit bowl", seconds: 6, color: "#ec1163" },
+  mango: { label: "Catch all", seconds: 5, color: "#ff8a1e", timed: true },
+  health: { label: "+1 Health", seconds: 0, color: "#ff5e6c", timed: false },
+  shield: { label: "Shield", seconds: 3, color: "#17a9a0", timed: true },
+  bowl: { label: "Fruit bowl", seconds: 6, color: "#ec1163", timed: true },
 };
 
 const POWER_KEYS = Object.keys(POWERS);
+const TIMED_KEYS = POWER_KEYS.filter((k) => POWERS[k].timed);
+
 const START_LIVES = 3;
+const MAX_LIVES = 5;
+
+const SCORPION_SCORE = 500; // scorpion peppers join the mix here
+const SKY_STEP = 50; // the sky shifts hue every this many points
+const SKY_END = 1500; // and lands on yellow here
+const SKY_FROM = 215; // blue
+const SKY_SPAN = 193; // through violet, magenta and orange to yellow
 
 export default function GamePage() {
   const wrapRef = useRef(null);
@@ -55,7 +65,7 @@ export default function GamePage() {
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
 
-    const ctx = canvas.getContext("2d", { alpha: true });
+    const ctx = canvas.getContext("2d", { alpha: false });
 
     const g = {
       w: 0,
@@ -65,8 +75,12 @@ export default function GamePage() {
       fruits: [],
       bits: [],
       pops: [],
+      rings: [],
+      motes: [],
       bowl: { x: 0, y: 0, w: 120, baseW: 120, h: 46, target: 0 },
-      fx: { mango: 0, speed: 0, shield: 0, bowl: 0 },
+      fx: { mango: 0, shield: 0, bowl: 0 },
+      lastPower: "mango",
+      hue: SKY_FROM,
       dragging: false,
       elapsed: 0,
       caught: 0,
@@ -82,6 +96,21 @@ export default function GamePage() {
       last: 0,
     };
     gameRef.current = g;
+
+    const seedMotes = () => {
+      g.motes = [];
+      const count = Math.round((g.w * g.h) / 42000);
+      for (let i = 0; i < count; i++) {
+        g.motes.push({
+          x: Math.random() * g.w,
+          y: Math.random() * g.h,
+          r: 0.8 + Math.random() * 1.7,
+          vy: 6 + Math.random() * 16,
+          a: 0.12 + Math.random() * 0.24,
+          drift: (Math.random() - 0.5) * 8,
+        });
+      }
+    };
 
     const layout = () => {
       const rect = wrap.getBoundingClientRect();
@@ -103,6 +132,7 @@ export default function GamePage() {
         g.bowl.target = g.w / 2;
       }
       clampBowl();
+      seedMotes();
 
       // A rotation or keyboard resize changes the reachable band, so pull any
       // fruit already falling back inside it.
@@ -165,11 +195,12 @@ export default function GamePage() {
 
     const baseRadius = () => Math.max(15, Math.min(g.w, 460) * 0.055);
 
+    // Half the old ramp: the climb comes mostly from the spawn rate now.
     const fallSpeed = () =>
-      (215 + g.elapsed * 13 + g.caught * 9) * g.unit * (0.9 + Math.random() * 0.25);
+      (215 + g.elapsed * 6.5 + g.caught * 4.5) * g.unit * (0.9 + Math.random() * 0.25);
 
     const pickFruit = () => {
-      const pool = FRUITS.filter((f) => g.caught >= f.unlock);
+      const pool = FRUITS.filter((f) => g.score >= f.unlock);
       const total = pool.reduce((sum, f) => sum + f.weight, 0);
       let roll = Math.random() * total;
       for (const f of pool) {
@@ -186,20 +217,46 @@ export default function GamePage() {
 
     const spawnFruit = () => {
       const pepper = g.caught >= 4 && Math.random() < 0.16;
-      const kind = pepper ? null : pickFruit();
-      const r = baseRadius() * (pepper ? 1 : kind.scale);
+
+      if (pepper) {
+        const scorpion = g.score >= SCORPION_SCORE && Math.random() < 0.18;
+        const r = baseRadius() * (scorpion ? 1.12 : 1);
+        g.fruits.push({
+          kind: "pepper",
+          scorpion,
+          x: place(r),
+          y: -r * 2,
+          prevBottom: -r,
+          r,
+          points: 0,
+          flesh: scorpion ? "#ff2424" : "#d21414",
+          skin: scorpion ? "#c20000" : "#7a0b0b",
+          spin: (Math.random() - 0.5) * 0.7,
+          rot: Math.random() * Math.PI,
+          seed: Math.random() * 12,
+          vy: fallSpeed(),
+        });
+        return;
+      }
+
+      const kind = pickFruit();
+      const r = baseRadius() * kind.scale;
+      // slight hue and lightness jitter so no two drops look identical
+      const hue = kind.hue + (Math.random() - 0.5) * 22;
+      const light = kind.light + (Math.random() - 0.5) * 8;
 
       g.fruits.push({
-        kind: pepper ? "pepper" : "fruit",
+        kind: "fruit",
         x: place(r),
         y: -r * 2,
         prevBottom: -r,
         r,
-        points: pepper ? 0 : kind.points,
-        flesh: pepper ? "#e02020" : kind.flesh,
-        skin: pepper ? "#a51414" : kind.skin,
-        spin: (Math.random() - 0.5) * 2.4,
-        rot: Math.random() * Math.PI,
+        points: kind.points,
+        flesh: `hsl(${hue}, ${kind.sat}%, ${light}%)`,
+        skin: `hsl(${hue - 4}, ${kind.sat}%, ${Math.max(18, light - 17)}%)`,
+        shine: `hsla(${hue + 16}, 100%, 92%, 0.6)`,
+        spin: (Math.random() - 0.5) * 0.9, // slow tumble
+        rot: Math.random() * Math.PI * 2,
         seed: Math.random() * 12,
         vy: fallSpeed(),
       });
@@ -221,6 +278,7 @@ export default function GamePage() {
         skin: "#ffffff",
         spin: 0,
         rot: 0,
+        seed: Math.random() * 12,
         vy: fallSpeed() * 0.62, // drifts down slower so it stays winnable
       });
       g.powerOut = true;
@@ -238,7 +296,23 @@ export default function GamePage() {
           r: 2 + Math.random() * 3,
         });
       }
-      if (g.bits.length > 90) g.bits.splice(0, g.bits.length - 90);
+      // a few white sparks on top, they read as juice at any background hue
+      for (let i = 0; i < 5; i++) {
+        g.bits.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 300,
+          vy: -Math.random() * 260 - 30,
+          life: 0.45,
+          color: "#ffffff",
+          r: 1 + Math.random() * 1.8,
+        });
+      }
+      if (g.bits.length > 120) g.bits.splice(0, g.bits.length - 120);
+    };
+
+    const ring = (x, y, color, delay) => {
+      g.rings.push({ x, y, r: 8, life: 0.75, max: 0.75, color, delay: delay || 0 });
     };
 
     const pop = (x, y, text, color, size) => {
@@ -268,9 +342,14 @@ export default function GamePage() {
     const update = (dt) => {
       g.elapsed += dt;
 
-      for (const key of POWER_KEYS) {
+      for (const key of TIMED_KEYS) {
         if (g.fx[key] > 0) g.fx[key] = Math.max(0, g.fx[key] - dt);
       }
+
+      // sky steps every SKY_STEP points, then eases toward the new hue
+      const step = Math.min(SKY_END / SKY_STEP, Math.floor(g.score / SKY_STEP));
+      const wantHue = SKY_FROM + (step / (SKY_END / SKY_STEP)) * SKY_SPAN;
+      g.hue += (wantHue - g.hue) * Math.min(1, dt * 2.2);
 
       // bowl width eases toward its target so Catch all reads as a sweep
       const wantW = g.fx.mango > 0 ? g.w : g.bowl.baseW;
@@ -278,8 +357,7 @@ export default function GamePage() {
       if (Math.abs(wantW - g.bowl.w) < 0.5) g.bowl.w = wantW;
 
       // bowl follows the finger, smoothed just enough to kill jitter
-      const follow = g.fx.speed > 0 ? 46 : 24;
-      g.bowl.x += (g.bowl.target - g.bowl.x) * Math.min(1, dt * follow);
+      g.bowl.x += (g.bowl.target - g.bowl.x) * Math.min(1, dt * 24);
       clampBowl();
 
       g.nextDrop -= dt * 1000;
@@ -317,7 +395,7 @@ export default function GamePage() {
         const overBowl = Math.abs(f.x - g.bowl.x) <= half;
 
         // embers trail off a burning pepper
-        if (f.kind === "pepper" && Math.random() < dt * 14) {
+        if (f.kind === "pepper" && Math.random() < dt * (f.scorpion ? 26 : 14)) {
           g.bits.push({
             x: f.x + (Math.random() - 0.5) * f.r,
             y: f.y - f.r * 0.9,
@@ -325,7 +403,13 @@ export default function GamePage() {
             vy: -30 - Math.random() * 50,
             life: 0.45,
             rise: true,
-            color: Math.random() < 0.5 ? "#ffd84d" : "#ff8a1e",
+            color: f.scorpion
+              ? Math.random() < 0.5
+                ? "#ffffff"
+                : "#ffd84d"
+              : Math.random() < 0.5
+              ? "#ffd84d"
+              : "#ff8a1e",
             r: 1.5 + Math.random() * 2,
           });
         }
@@ -336,14 +420,41 @@ export default function GamePage() {
           if (f.kind === "power") {
             g.powerOut = false;
             const spec = POWERS[f.power];
-            g.fx[f.power] = spec.seconds; // refreshes rather than stacks
+            g.lastPower = f.power;
             burst(f.x, rimY, spec.color);
-            pop(f.x, rimY - 14, spec.label, spec.color, 19);
+            ring(f.x, rimY, spec.color, 0);
+            ring(f.x, rimY, "#ffffff", 0.12);
+
+            if (f.power === "health") {
+              if (g.lives < MAX_LIVES) {
+                g.lives += 1;
+                setLives(g.lives);
+                pop(f.x, rimY - 14, "+1 Health", spec.color, 19);
+              } else {
+                // already topped up, pay it out instead of wasting the drop
+                g.score += 100;
+                setScore(g.score);
+                pop(f.x, rimY - 14, "+100", spec.color, 19);
+              }
+            } else {
+              g.fx[f.power] = spec.seconds; // refreshes rather than stacks
+              pop(f.x, rimY - 14, spec.label, spec.color, 19);
+            }
           } else if (f.kind === "pepper") {
             if (g.fx.mango > 0) {
               // Catch all is a fire of its own; peppers burn up harmlessly.
               burst(f.x, rimY, "#ffb020");
               pop(f.x, rimY - 12, "Burned up", "#ffd84d", 17);
+            } else if (f.scorpion) {
+              // Nothing survives a scorpion. Shield does not cover this.
+              burst(f.x, rimY, "#ff2424");
+              ring(f.x, rimY, "#ff2424", 0);
+              g.lives = 0;
+              g.shake = 0.6;
+              setLives(0);
+              setHurt(performance.now());
+              pop(f.x, rimY - 14, "Scorpion!", "#ff5e6c", 22);
+              end();
             } else {
               burst(f.x, rimY, "#e02020");
               loseLife(f.x, rimY);
@@ -352,7 +463,7 @@ export default function GamePage() {
             g.caught += 1;
             g.score += f.points;
             burst(f.x, rimY, f.flesh);
-            pop(f.x, rimY - 10, `+${f.points}`, "#fff8e6", f.points >= 30 ? 22 : 17);
+            pop(f.x, rimY - 10, `+${f.points}`, "#ffffff", f.points >= 30 ? 22 : 17);
             setScore(g.score);
           }
           continue;
@@ -378,6 +489,26 @@ export default function GamePage() {
         b.y += b.vy * dt;
       }
 
+      for (let i = g.rings.length - 1; i >= 0; i--) {
+        const rg = g.rings[i];
+        if (rg.delay > 0) {
+          rg.delay -= dt;
+          continue;
+        }
+        rg.life -= dt;
+        rg.r += 520 * dt;
+        if (rg.life <= 0) g.rings.splice(i, 1);
+      }
+
+      for (const m of g.motes) {
+        m.y -= m.vy * dt;
+        m.x += m.drift * dt;
+        if (m.y < -4) {
+          m.y = g.h + 4;
+          m.x = Math.random() * g.w;
+        }
+      }
+
       for (let i = g.pops.length - 1; i >= 0; i--) {
         const p = g.pops[i];
         p.life -= dt;
@@ -391,7 +522,7 @@ export default function GamePage() {
       g.hudTick += dt;
       if (g.hudTick >= 0.1) {
         g.hudTick = 0;
-        const live = POWER_KEYS.filter((k) => g.fx[k] > 0).map((k) => ({
+        const live = TIMED_KEYS.filter((k) => g.fx[k] > 0).map((k) => ({
           key: k,
           label: POWERS[k].label,
           color: POWERS[k].color,
@@ -409,7 +540,7 @@ export default function GamePage() {
     const end = () => {
       g.phase = "over";
       g.dragging = false;
-      for (const key of POWER_KEYS) g.fx[key] = 0;
+      for (const key of TIMED_KEYS) g.fx[key] = 0;
       setActive([]);
       setPhase("over");
       setSaveState("idle");
@@ -425,6 +556,47 @@ export default function GamePage() {
 
     /* ----------------------------------------------------------- draw */
 
+    const drawSky = () => {
+      const h = g.hue;
+      const grad = ctx.createLinearGradient(0, 0, 0, g.h);
+      grad.addColorStop(0, `hsl(${h}, 74%, 73%)`);
+      grad.addColorStop(0.52, `hsl(${h + 10}, 78%, 63%)`);
+      grad.addColorStop(1, `hsl(${h + 42}, 55%, 48%)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, g.w, g.h);
+
+      // drifting motes
+      ctx.fillStyle = "#ffffff";
+      for (const m of g.motes) {
+        ctx.globalAlpha = m.a;
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    };
+
+    // While an effect runs, scroll a soft diagonal stripe pattern in its colour.
+    const drawPowerPattern = () => {
+      const key = TIMED_KEYS.find((k) => g.fx[k] > 0);
+      if (!key) return;
+      const fade = Math.min(1, g.fx[key] / 0.8);
+      const gap = 62;
+      const offset = (g.elapsed * 80) % gap;
+
+      ctx.save();
+      ctx.globalAlpha = 0.11 * fade;
+      ctx.fillStyle = POWERS[key].color;
+      ctx.translate(-g.h * 0.4, 0);
+      ctx.rotate(-0.42);
+      const span = g.w + g.h * 1.6;
+      for (let x = -gap; x < span; x += gap) {
+        ctx.fillRect(x + offset, -g.h, gap * 0.42, g.h * 3);
+      }
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    };
+
     const drawCitrus = (f) => {
       ctx.fillStyle = f.skin;
       ctx.beginPath();
@@ -436,7 +608,7 @@ export default function GamePage() {
       ctx.arc(0, 0, f.r * 0.94, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.fillStyle = f.shine || "rgba(255,255,255,0.55)";
       ctx.beginPath();
       ctx.ellipse(-f.r * 0.32, -f.r * 0.38, f.r * 0.26, f.r * 0.17, -0.6, 0, Math.PI * 2);
       ctx.fill();
@@ -448,7 +620,7 @@ export default function GamePage() {
     };
 
     // A rounded, curling flame. `sway` bends the tip so each one flickers on
-    // its own phase instead of the whole fire pulsing as a single shape.
+    // its own phase, and the base closes as a bulb rather than a flat cut.
     const tongue = (x, baseY, w, h, sway, color) => {
       ctx.fillStyle = color;
       ctx.beginPath();
@@ -463,7 +635,11 @@ export default function GamePage() {
         x + w * 1.15, baseY - h * 0.36,
         x + w, baseY
       );
-      ctx.quadraticCurveTo(x, baseY + h * 0.14, x - w, baseY);
+      ctx.bezierCurveTo(
+        x + w * 1.02, baseY + w * 0.98,
+        x - w * 1.02, baseY + w * 0.98,
+        x - w, baseY
+      );
       ctx.closePath();
       ctx.fill();
     };
@@ -471,44 +647,56 @@ export default function GamePage() {
     const drawPepper = (f) => {
       const r = f.r;
       const t = g.elapsed;
-      const a = Math.sin(t * 13 + f.seed);
-      const b = Math.sin(t * 9.3 + f.seed * 2.4 + 1.1);
-      const c = Math.sin(t * 17 + f.seed * 1.7 + 2.2);
+      const hot = f.scorpion;
+      const a = Math.sin(t * (hot ? 19 : 13) + f.seed);
+      const b = Math.sin(t * (hot ? 13 : 9.3) + f.seed * 2.4 + 1.1);
+      const c = Math.sin(t * (hot ? 23 : 17) + f.seed * 1.7 + 2.2);
 
-      // heat halo, dark enough to hold up on both the yellow sky and teal ground
-      ctx.fillStyle = "rgba(200,25,0,0.15)";
+      // heat halo, dark enough to hold up on any sky hue
+      ctx.fillStyle = hot ? "rgba(255,60,0,0.3)" : "rgba(200,25,0,0.15)";
       ctx.beginPath();
-      ctx.arc(0, -r * 0.45, r * (1.35 + (a + 1) * 0.07), 0, Math.PI * 2);
+      ctx.arc(0, -r * 0.45, r * ((hot ? 1.6 : 1.35) + (a + 1) * 0.09), 0, Math.PI * 2);
       ctx.fill();
+      if (hot) {
+        ctx.fillStyle = "rgba(255,180,60,0.22)";
+        ctx.beginPath();
+        ctx.arc(0, -r * 0.4, r * (1.1 + (c + 1) * 0.08), 0, Math.PI * 2);
+        ctx.fill();
+      }
 
-      // three separate red tongues at different heights and phases
-      tongue(-r * 0.52, -r * 0.1, r * 0.36, r * (1.05 + (b + 1) * 0.3), b * r * 0.22, "#ff2d00");
-      tongue(r * 0.5, -r * 0.16, r * 0.34, r * (0.9 + (c + 1) * 0.3), c * r * 0.22, "#ff2d00");
-      tongue(-r * 0.06, -r * 0.42, r * 0.52, r * (1.5 + (a + 1) * 0.34), a * r * 0.24, "#ff2d00");
-      // orange layer, offset so it never nests concentrically inside the red
-      tongue(-r * 0.3, -r * 0.26, r * 0.26, r * (0.8 + (c + 1) * 0.26), c * r * 0.16, "#ff8a1e");
-      tongue(r * 0.22, -r * 0.34, r * 0.24, r * (0.95 + (a + 1) * 0.26), a * r * 0.16, "#ff8a1e");
-      tongue(-r * 0.02, -r * 0.5, r * 0.3, r * (0.95 + (b + 1) * 0.28), b * r * 0.18, "#ffb020");
+      const tall = hot ? 1.18 : 1;
+      const outer = hot ? "#ff0000" : "#ff2d00";
+      const mid = hot ? "#ff6a00" : "#ff8a1e";
+      const inner = hot ? "#ffd84d" : "#ffb020";
+
+      // three separate tongues at different heights and phases
+      tongue(-r * 0.52, -r * 0.1, r * 0.36, r * (1.05 + (b + 1) * 0.3) * tall, b * r * 0.22, outer);
+      tongue(r * 0.5, -r * 0.16, r * 0.34, r * (0.9 + (c + 1) * 0.3) * tall, c * r * 0.22, outer);
+      tongue(-r * 0.06, -r * 0.42, r * 0.52, r * (1.5 + (a + 1) * 0.34) * tall, a * r * 0.24, outer);
+      // offset so the layers never nest concentrically
+      tongue(-r * 0.3, -r * 0.26, r * 0.26, r * (0.8 + (c + 1) * 0.26) * tall, c * r * 0.16, mid);
+      tongue(r * 0.22, -r * 0.34, r * 0.24, r * (0.95 + (a + 1) * 0.26) * tall, a * r * 0.16, mid);
+      tongue(-r * 0.02, -r * 0.5, r * 0.3, r * (0.95 + (b + 1) * 0.28) * tall, b * r * 0.18, inner);
 
       // the pepper itself, in front so it stays recognisable
       ctx.save();
       ctx.rotate(f.rot * 0.16);
-      ctx.fillStyle = "#7a0b0b";
+      ctx.fillStyle = f.skin;
       ctx.beginPath();
       ctx.ellipse(0, r * 0.12, r * 0.62, r * 1.0, 0.22, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = "#d21414";
+      ctx.fillStyle = f.flesh;
       ctx.beginPath();
       ctx.ellipse(0, r * 0.06, r * 0.58, r * 0.95, 0.22, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = "rgba(64,0,0,0.7)";
-      ctx.lineWidth = 2.2;
+      ctx.strokeStyle = hot ? "rgba(255,210,120,0.85)" : "rgba(64,0,0,0.7)";
+      ctx.lineWidth = hot ? 2.6 : 2.2;
       ctx.beginPath();
       ctx.ellipse(0, r * 0.06, r * 0.58, r * 0.95, 0.22, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = "rgba(255,205,150,0.6)";
+      ctx.fillStyle = hot ? "rgba(255,240,200,0.85)" : "rgba(255,205,150,0.6)";
       ctx.beginPath();
-      ctx.ellipse(-r * 0.22, -r * 0.08, r * 0.11, r * 0.4, 0.22, 0, Math.PI * 2);
+      ctx.ellipse(-r * 0.22, -r * 0.08, r * (hot ? 0.14 : 0.11), r * 0.4, 0.22, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = "#2f7d32";
       ctx.lineWidth = Math.max(3, r * 0.19);
@@ -517,11 +705,20 @@ export default function GamePage() {
       ctx.moveTo(-r * 0.2, -r * 0.82);
       ctx.lineTo(0, -r * 1.2);
       ctx.stroke();
+      // scorpion tail hook, the tell that this one ends the run
+      if (hot) {
+        ctx.strokeStyle = "#5a0000";
+        ctx.lineWidth = Math.max(2.5, r * 0.15);
+        ctx.beginPath();
+        ctx.moveTo(r * 0.1, r * 0.9);
+        ctx.quadraticCurveTo(r * 0.62, r * 1.05, r * 0.5, r * 0.55);
+        ctx.stroke();
+      }
       ctx.restore();
 
       // bright licks in front of the shoulders
-      tongue(-r * 0.34, -r * 0.3, r * 0.17, r * (0.55 + (c + 1) * 0.2), c * r * 0.1, "#ffd84d");
-      tongue(r * 0.3, -r * 0.4, r * 0.15, r * (0.5 + (b + 1) * 0.2), b * r * 0.1, "#ffe9a0");
+      tongue(-r * 0.34, -r * 0.3, r * 0.17, r * (0.55 + (c + 1) * 0.2) * tall, c * r * 0.1, hot ? "#ffffff" : "#ffd84d");
+      tongue(r * 0.3, -r * 0.4, r * 0.15, r * (0.5 + (b + 1) * 0.2) * tall, b * r * 0.1, hot ? "#fffbe0" : "#ffe9a0");
     };
 
     const drawPower = (f) => {
@@ -555,20 +752,17 @@ export default function GamePage() {
         return;
       }
 
-      if (f.power === "speed") {
-        ctx.fillStyle = "#ffd500";
+      if (f.power === "health") {
+        ctx.fillStyle = "#ff5e6c";
         ctx.beginPath();
-        ctx.arc(0, 0, r * 0.9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "#5b2c8d";
-        ctx.beginPath();
-        ctx.moveTo(r * 0.12, -r * 0.62);
-        ctx.lineTo(-r * 0.34, r * 0.1);
-        ctx.lineTo(-r * 0.02, r * 0.1);
-        ctx.lineTo(-r * 0.16, r * 0.66);
-        ctx.lineTo(r * 0.36, -r * 0.12);
-        ctx.lineTo(r * 0.02, -r * 0.12);
+        ctx.moveTo(0, r * 0.72);
+        ctx.bezierCurveTo(-r * 1.05, -r * 0.1, -r * 0.5, -r * 0.92, 0, -r * 0.34);
+        ctx.bezierCurveTo(r * 0.5, -r * 0.92, r * 1.05, -r * 0.1, 0, r * 0.72);
         ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.65)";
+        ctx.beginPath();
+        ctx.ellipse(-r * 0.3, -r * 0.3, r * 0.16, r * 0.1, -0.6, 0, Math.PI * 2);
         ctx.fill();
         return;
       }
@@ -620,7 +814,7 @@ export default function GamePage() {
       ctx.translate(f.x, f.y);
       // Only round fruit tumbles. Peppers rotate their body internally so the
       // flames keep pointing up, and power-ups stay level to stay readable.
-      if (f.kind === "fruit") ctx.rotate(f.rot * 0.25);
+      if (f.kind === "fruit") ctx.rotate(f.rot);
       if (f.kind === "power") drawPower(f);
       else if (f.kind === "pepper") drawPepper(f);
       else drawCitrus(f);
@@ -644,6 +838,10 @@ export default function GamePage() {
       ctx.quadraticCurveTo(x + w * 0.46, y + h, x + w / 2, y);
       ctx.closePath();
       ctx.fill();
+      // the sky cycles through violet, so the bowl needs its own edge
+      ctx.strokeStyle = "rgba(255,248,230,0.92)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
 
       // stripe
       ctx.fillStyle = "#ec1163";
@@ -686,13 +884,27 @@ export default function GamePage() {
     };
 
     const draw = () => {
-      ctx.clearRect(0, 0, g.w, g.h);
+      drawSky();
+      drawPowerPattern();
+
       ctx.save();
       if (g.shake > 0) {
         ctx.translate((Math.random() - 0.5) * g.shake * 22, (Math.random() - 0.5) * g.shake * 14);
       }
 
       for (const f of g.fruits) drawItem(f);
+
+      for (const rg of g.rings) {
+        if (rg.delay > 0) continue;
+        const fade = Math.max(0, rg.life / rg.max);
+        ctx.globalAlpha = fade * 0.8;
+        ctx.strokeStyle = rg.color;
+        ctx.lineWidth = 2 + 5 * fade;
+        ctx.beginPath();
+        ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
 
       for (const b of g.bits) {
         ctx.globalAlpha = Math.max(0, b.life / 0.55);
@@ -768,6 +980,7 @@ export default function GamePage() {
     g.fruits = [];
     g.bits = [];
     g.pops = [];
+    g.rings = [];
     g.elapsed = 0;
     g.caught = 0;
     g.score = 0;
@@ -777,7 +990,8 @@ export default function GamePage() {
     g.powerOut = false;
     g.shake = 0;
     g.hudSig = "";
-    for (const key of POWER_KEYS) g.fx[key] = 0;
+    g.hue = SKY_FROM;
+    for (const key of TIMED_KEYS) g.fx[key] = 0;
     g.bowl.w = g.bowl.baseW;
     g.bowl.target = g.w / 2;
     g.bowl.x = g.w / 2;
@@ -852,8 +1066,8 @@ export default function GamePage() {
         <div className="hud__chip">
           <span className="hud__cap">Health</span>
           <span className="hud__lives">
-            <b>{"♥".repeat(Math.max(0, lives))}</b>
-            <i>{"♡".repeat(Math.max(0, START_LIVES - lives))}</i>
+            <b>{"\u2665".repeat(Math.max(0, lives))}</b>
+            <i>{"\u2661".repeat(Math.max(0, START_LIVES - lives))}</i>
           </span>
         </div>
         <Link href="/" className="hud__back">
@@ -881,39 +1095,52 @@ export default function GamePage() {
           <div className="panel">
             <h1 className="panel__title">Catch the Citrus</h1>
             <p className="panel__text">
-              Drag anywhere to slide the bowl. The fruit gets smaller and faster
-              as you go, and small fruit pays the most.
+              Drag anywhere to slide the bowl. New fruit joins as your score
+              climbs, and the smaller it is the more it pays.
             </p>
 
             <ul className="rules">
               <li className="rules__row">
-                <span className="rules__dot" style={{ background: "#ff5e5b" }} />
+                <span className="rules__dot" style={{ background: "hsl(2,78%,60%)" }} />
                 Grapefruit 5
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "#ff8a1e", width: 13, height: 13 }}
+                  style={{ background: "hsl(28,96%,55%)", width: 13, height: 13 }}
                 />
                 Orange 10
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "#7cb518", width: 10, height: 10 }}
+                  style={{ background: "hsl(50,100%,52%)", width: 11, height: 11 }}
                 />
-                Lime 30
+                Lemon 15 at 150
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "#ffa41e", width: 8, height: 8 }}
+                  style={{ background: "hsl(82,72%,44%)", width: 9, height: 9 }}
                 />
-                Kumquat 60
+                Lime 30 at 500
               </li>
               <li className="rules__row">
-                <span className="rules__dot" style={{ background: "#d81414" }} />
-                Burning pepper costs a life
+                <span
+                  className="rules__dot"
+                  style={{ background: "hsl(33,100%,56%)", width: 7, height: 7 }}
+                />
+                Kumquat 60 at 900
+              </li>
+            </ul>
+
+            <ul className="rules rules--stack">
+              <li>
+                <b style={{ color: "#d21414" }}>Burning pepper</b> — costs a life.
+              </li>
+              <li>
+                <b style={{ color: "#ff2424" }}>Scorpion pepper</b> — from 500, and
+                catching one ends the run on the spot.
               </li>
             </ul>
 
@@ -925,12 +1152,12 @@ export default function GamePage() {
                 faster. 5s
               </li>
               <li>
-                <b style={{ color: POWERS.speed.color }}>Quick hands</b> — the bowl
-                tracks your finger faster. 5s
+                <b style={{ color: POWERS.health.color }}>+1 Health</b> — one heart
+                back, up to five.
               </li>
               <li>
-                <b style={{ color: POWERS.shield.color }}>Shield</b> — drops cost
-                you nothing. 3s
+                <b style={{ color: POWERS.shield.color }}>Shield</b> — dropped fruit
+                costs you nothing. 3s
               </li>
               <li>
                 <b style={{ color: POWERS.bowl.color }}>Fruit bowl</b> — double the
