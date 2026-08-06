@@ -557,3 +557,9 @@ input {
     animation-duration: 300ms;
   }
 }
+
+/* green edge glow when a heart is gained */
+
+.flash--heal {
+  box-shadow: inset 0 0 58px 8px rgba(38, 200, 116, 0.6);
+}

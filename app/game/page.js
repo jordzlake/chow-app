@@ -7,18 +7,21 @@ import Link from "next/link";
    the pool, so the drop mix widens as the run goes rather than all at once.
    Colours are HSL so each drop can jitter its own hue slightly. */
 const FRUITS = [
-  { key: "grapefruit", scale: 1.3, points: 5, hue: 2, sat: 78, light: 60, unlock: 0, weight: 3 },
-  { key: "orange", scale: 1.0, points: 10, hue: 28, sat: 96, light: 55, unlock: 0, weight: 4 },
-  { key: "lemon", scale: 0.86, points: 15, hue: 50, sat: 100, light: 52, unlock: 150, weight: 3 },
-  { key: "lime", scale: 0.66, points: 30, hue: 82, sat: 72, light: 44, unlock: 500, weight: 3 },
-  { key: "kumquat", scale: 0.46, points: 60, hue: 33, sat: 100, light: 56, unlock: 900, weight: 2 },
+  { key: "grapefruit", shape: "round", scale: 1.3, points: 5, hue: 2, sat: 78, light: 60, unlock: 0, weight: 3 },
+  { key: "orange", shape: "round", scale: 1.0, points: 10, hue: 28, sat: 96, light: 55, unlock: 0, weight: 4 },
+  { key: "lemon", shape: "round", scale: 0.86, points: 15, hue: 50, sat: 100, light: 52, unlock: 150, weight: 3 },
+  { key: "cucumber", shape: "long", scale: 1.15, points: 8, hue: 102, sat: 44, light: 40, unlock: 250, weight: 3 },
+  { key: "lime", shape: "round", scale: 0.66, points: 30, hue: 82, sat: 72, light: 44, unlock: 500, weight: 3 },
+  { key: "apple", shape: "apple", scale: 0.92, points: 20, hue: 352, sat: 78, light: 48, unlock: 700, weight: 3 },
+  { key: "kumquat", shape: "round", scale: 0.46, points: 60, hue: 33, sat: 100, light: 56, unlock: 900, weight: 2 },
+  { key: "cherries", shape: "cherries", scale: 0.5, points: 80, hue: 344, sat: 80, light: 44, unlock: 1200, weight: 2 },
 ];
 
 const POWERS = {
-  mango: { label: "Catch all", seconds: 5, color: "#ff8a1e", timed: true },
+  mango: { label: "Catch all", seconds: 9, color: "#ff8a1e", timed: true },
   health: { label: "+1 Health", seconds: 0, color: "#ff5e6c", timed: false },
-  shield: { label: "Shield", seconds: 3, color: "#17a9a0", timed: true },
-  bowl: { label: "Fruit bowl", seconds: 6, color: "#ec1163", timed: true },
+  shield: { label: "Shield", seconds: 7, color: "#17a9a0", timed: true },
+  bowl: { label: "Fruit bowl", seconds: 10, color: "#ec1163", timed: true },
 };
 
 const POWER_KEYS = Object.keys(POWERS);
@@ -43,7 +46,8 @@ export default function GamePage() {
   const [lives, setLives] = useState(START_LIVES);
   const [best, setBest] = useState(0);
   const [active, setActive] = useState([]); // live power-up timers for the HUD
-  const [hurt, setHurt] = useState(0); // timestamp of the last hit, keys the flash
+  const [hurt, setHurt] = useState(0); // timestamp of the last hit, keys the red flash
+  const [heal, setHeal] = useState(0); // and of the last heart gained, keys the green one
 
   const [name, setName] = useState("");
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
@@ -254,6 +258,7 @@ export default function GamePage() {
         prevBottom: -r,
         r,
         points: kind.points,
+        shape: kind.shape,
         flesh: `hsl(${hue}, ${kind.sat}%, ${light}%)`,
         skin: `hsl(${hue - 4}, ${kind.sat}%, ${Math.max(18, light - 17)}%)`,
         shine: `hsla(${hue + 16}, 100%, 92%, 0.6)`,
@@ -331,10 +336,10 @@ export default function GamePage() {
       }
     };
 
-    // Fruit bowl leaves a crowded screen behind. When it ends, wipe what is
-    // still falling so the speed coming back does not bury you. Power-ups are
-    // left alone, and nothing cleared this way costs a life.
-    const sweep = () => {
+    // A power-up ending leaves a crowded screen behind. Wipe what is still
+    // falling so normal play does not resume mid-avalanche. Power-ups are left
+    // alone, and nothing cleared this way costs a life.
+    const sweep = (endedKey) => {
       let cleared = 0;
       for (let i = g.fruits.length - 1; i >= 0; i--) {
         if (g.fruits[i].kind === "power") continue;
@@ -345,7 +350,7 @@ export default function GamePage() {
       }
       if (cleared > 0) {
         ring(g.bowl.x, g.bowl.y, "#ffffff", 0);
-        ring(g.bowl.x, g.bowl.y, POWERS.bowl.color, 0.12);
+        ring(g.bowl.x, g.bowl.y, POWERS[endedKey || "bowl"].color, 0.12);
         pop(g.w / 2, g.h * 0.42, "Cleared", "#ffffff", 20);
       }
     };
@@ -362,6 +367,12 @@ export default function GamePage() {
       (g.fx.mango > 0 ? 1.5 : 1) * (g.fx.bowl > 0 ? 0.4 : 1);
 
     const loseLife = (x, y) => {
+      // Fruit bowl is a free scoring window, so a drop during it costs nothing.
+      // Kept quiet rather than popping text, since drops come thick and fast.
+      if (g.fx.bowl > 0 && g.fx.shield <= 0) {
+        puff(x, y);
+        return;
+      }
       if (g.fx.shield > 0) {
         burst(x, y, POWERS.shield.color);
         pop(x, y, "Blocked", POWERS.shield.color, 16);
@@ -377,15 +388,22 @@ export default function GamePage() {
     const update = (dt) => {
       g.elapsed += dt;
 
-      const bowlWasUp = g.fx.bowl > 0;
+      let endedKey = null;
       for (const key of TIMED_KEYS) {
-        if (g.fx[key] > 0) g.fx[key] = Math.max(0, g.fx[key] - dt);
+        const wasUp = g.fx[key] > 0;
+        if (wasUp) g.fx[key] = Math.max(0, g.fx[key] - dt);
+        if (wasUp && g.fx[key] <= 0) endedKey = key;
       }
-      if (bowlWasUp && g.fx.bowl <= 0) sweep();
+      // Every power-up ends with a clean screen, so the run never resumes
+      // with a backlog already halfway down.
+      if (endedKey) sweep(endedKey);
 
       // sky steps every SKY_STEP points, then eases toward the new hue
       const step = Math.min(SKY_END / SKY_STEP, Math.floor(g.score / SKY_STEP));
-      const wantHue = SKY_FROM + (step / (SKY_END / SKY_STEP)) * SKY_SPAN;
+      // eased so the sky holds its blues and violets, and only turns yellow
+      // in the last stretch before SKY_END
+      const linear = step / (SKY_END / SKY_STEP);
+      const wantHue = SKY_FROM + Math.pow(linear, 1.7) * SKY_SPAN;
       g.hue += (wantHue - g.hue) * Math.min(1, dt * 2.2);
 
       // bowl width eases toward its target so Catch all reads as a sweep
@@ -467,6 +485,7 @@ export default function GamePage() {
               if (g.lives < MAX_LIVES) {
                 g.lives += 1;
                 setLives(g.lives);
+                setHeal(performance.now()); // green edge glow
                 pop(f.x, rimY - 14, "+1 Health", spec.color, 19);
               } else {
                 // already at full health: no extra heart is banked, so the
@@ -656,6 +675,111 @@ export default function GamePage() {
       ctx.beginPath();
       ctx.ellipse(f.r * 0.42, -f.r * 0.72, f.r * 0.3, f.r * 0.15, -0.7, 0, Math.PI * 2);
       ctx.fill();
+    };
+
+    const drawCucumber = (f) => {
+      const r = f.r;
+      ctx.fillStyle = f.skin;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 0.44, r * 1.05, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = f.flesh;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 0.37, r * 0.98, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ridges down the length
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = Math.max(1.5, r * 0.07);
+      ctx.lineCap = "round";
+      for (const dx of [-0.16, 0.02, 0.18]) {
+        ctx.beginPath();
+        ctx.moveTo(r * dx, -r * 0.62);
+        ctx.lineTo(r * dx, r * 0.62);
+        ctx.stroke();
+      }
+      ctx.fillStyle = f.shine || "rgba(255,255,255,0.4)";
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.16, -r * 0.42, r * 0.08, r * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // blossom end
+      ctx.fillStyle = "#dfe8b8";
+      ctx.beginPath();
+      ctx.ellipse(0, r * 1.0, r * 0.1, r * 0.07, 0, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    const drawApple = (f) => {
+      const r = f.r;
+      // two lobes give the apple its dip at the top
+      ctx.fillStyle = f.skin;
+      ctx.beginPath();
+      ctx.arc(-r * 0.32, r * 0.06, r * 0.72, 0, Math.PI * 2);
+      ctx.arc(r * 0.32, r * 0.06, r * 0.72, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = f.flesh;
+      ctx.beginPath();
+      ctx.arc(-r * 0.3, r * 0.02, r * 0.67, 0, Math.PI * 2);
+      ctx.arc(r * 0.3, r * 0.02, r * 0.67, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = f.shine || "rgba(255,255,255,0.5)";
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.46, -r * 0.34, r * 0.2, r * 0.13, -0.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "#6b3b17";
+      ctx.lineWidth = Math.max(2, r * 0.11);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 0.58);
+      ctx.quadraticCurveTo(r * 0.12, -r * 0.95, r * 0.04, -r * 1.12);
+      ctx.stroke();
+      ctx.fillStyle = "#3f7d1f";
+      ctx.beginPath();
+      ctx.ellipse(r * 0.35, -r * 0.92, r * 0.28, r * 0.13, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    const drawCherries = (f) => {
+      const r = f.r;
+      // stems first, meeting at a single joint
+      ctx.strokeStyle = "#5f8b28";
+      ctx.lineWidth = Math.max(2, r * 0.13);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 1.15);
+      ctx.quadraticCurveTo(-r * 0.5, -r * 0.85, -r * 0.52, -r * 0.2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 1.15);
+      ctx.quadraticCurveTo(r * 0.55, -r * 0.8, r * 0.5, -r * 0.05);
+      ctx.stroke();
+
+      for (const [cx, cy, rad] of [
+        [-r * 0.52, r * 0.36, r * 0.62],
+        [r * 0.5, r * 0.5, r * 0.68],
+      ]) {
+        ctx.fillStyle = f.skin;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = f.flesh;
+        ctx.beginPath();
+        ctx.arc(cx, cy - rad * 0.05, rad * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = f.shine || "rgba(255,255,255,0.5)";
+        ctx.beginPath();
+        ctx.ellipse(cx - rad * 0.3, cy - rad * 0.35, rad * 0.24, rad * 0.15, -0.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    const drawFruit = (f) => {
+      if (f.shape === "long") drawCucumber(f);
+      else if (f.shape === "apple") drawApple(f);
+      else if (f.shape === "cherries") drawCherries(f);
+      else drawCitrus(f);
     };
 
     // A rounded, curling flame. `sway` bends the tip so each one flickers on
@@ -851,12 +975,16 @@ export default function GamePage() {
     const drawItem = (f) => {
       ctx.save();
       ctx.translate(f.x, f.y);
-      // Only round fruit tumbles. Peppers rotate their body internally so the
-      // flames keep pointing up, and power-ups stay level to stay readable.
-      if (f.kind === "fruit") ctx.rotate(f.rot);
+      // Round fruit tumbles. Shaped fruit only sways, since a cucumber or a
+      // bunch of cherries upside down looks broken rather than playful.
+      // Peppers rotate their body internally so the flames keep pointing up,
+      // and power-ups stay level to stay readable.
+      if (f.kind === "fruit") {
+        ctx.rotate(f.shape === "round" ? f.rot : Math.sin(f.rot) * 0.32);
+      }
       if (f.kind === "power") drawPower(f);
       else if (f.kind === "pepper") drawPepper(f);
-      else drawCitrus(f);
+      else drawFruit(f);
       ctx.restore();
     };
 
@@ -1039,6 +1167,7 @@ export default function GamePage() {
     setLives(START_LIVES);
     setActive([]);
     setHurt(0);
+    setHeal(0);
     setBoardOpen(false);
     setPhase("playing");
   }, []);
@@ -1095,7 +1224,8 @@ export default function GamePage() {
     <main className="game" ref={wrapRef}>
       <canvas ref={canvasRef} className="game__canvas" />
 
-      {hurt > 0 && <div className="flash" key={hurt} />}
+      {hurt > 0 && <div className="flash" key={`hurt-${hurt}`} />}
+      {heal > 0 && <div className="flash flash--heal" key={`heal-${heal}`} />}
 
       <div className="hud">
         <div className="hud__chip">
@@ -1146,30 +1276,51 @@ export default function GamePage() {
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "hsl(28,96%,55%)", width: 13, height: 13 }}
+                  style={{ background: "hsl(28,96%,55%)", width: 14, height: 14 }}
                 />
                 Orange 10
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "hsl(50,100%,52%)", width: 11, height: 11 }}
+                  style={{ background: "hsl(50,100%,52%)", width: 13, height: 13 }}
                 />
                 Lemon 15 at 150
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "hsl(82,72%,44%)", width: 9, height: 9 }}
+                  style={{ background: "hsl(102,44%,40%)", width: 9, height: 15, borderRadius: 5 }}
+                />
+                Cucumber 8 at 250
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "hsl(82,72%,44%)", width: 11, height: 11 }}
                 />
                 Lime 30 at 500
               </li>
               <li className="rules__row">
                 <span
                   className="rules__dot"
-                  style={{ background: "hsl(33,100%,56%)", width: 7, height: 7 }}
+                  style={{ background: "hsl(352,78%,48%)", width: 13, height: 12 }}
+                />
+                Apple 20 at 700
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "hsl(33,100%,56%)", width: 8, height: 8 }}
                 />
                 Kumquat 60 at 900
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "hsl(344,80%,44%)", width: 9, height: 9 }}
+                />
+                Cherries 80 at 1200
               </li>
             </ul>
 
@@ -1188,7 +1339,7 @@ export default function GamePage() {
               <li>
                 <b style={{ color: POWERS.mango.color }}>Catch all</b> — bowl spans
                 the screen and peppers burn up harmlessly, but fruit falls
-                faster. 5s
+                faster. 9s
               </li>
               <li>
                 <b style={{ color: POWERS.health.color }}>+1 Health</b> — one heart
@@ -1196,14 +1347,17 @@ export default function GamePage() {
               </li>
               <li>
                 <b style={{ color: POWERS.shield.color }}>Shield</b> — dropped fruit
-                costs you nothing. 3s
+                costs you nothing. 7s
               </li>
               <li>
                 <b style={{ color: POWERS.bowl.color }}>Fruit bowl</b> — double the
-                fruit at 40% speed. 6s
+                fruit at 40% speed, no peppers, and drops are free. 10s
               </li>
             </ul>
-            <p className="panel__text">Miss a power-up and nothing happens.</p>
+            <p className="panel__text">
+              Miss a power-up and nothing happens. Every power-up clears the
+              screen when it ends.
+            </p>
 
             <button className="btn" onClick={start}>
               Start
