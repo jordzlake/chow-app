@@ -25,7 +25,7 @@ const POWER_KEYS = Object.keys(POWERS);
 const TIMED_KEYS = POWER_KEYS.filter((k) => POWERS[k].timed);
 
 const START_LIVES = 3;
-const MAX_LIVES = 5;
+const MAX_LIVES = START_LIVES; // three hearts is full; extras are not banked
 
 const SCORPION_SCORE = 500; // scorpion peppers join the mix here
 const SKY_STEP = 50; // the sky shifts hue every this many points
@@ -195,9 +195,9 @@ export default function GamePage() {
 
     const baseRadius = () => Math.max(15, Math.min(g.w, 460) * 0.055);
 
-    // Half the old ramp: the climb comes mostly from the spawn rate now.
+    // Half the old ramp, then the whole curve taken down another fifth.
     const fallSpeed = () =>
-      (215 + g.elapsed * 6.5 + g.caught * 4.5) * g.unit * (0.9 + Math.random() * 0.25);
+      (172 + g.elapsed * 5.2 + g.caught * 3.6) * g.unit * (0.9 + Math.random() * 0.25);
 
     const pickFruit = () => {
       const pool = FRUITS.filter((f) => g.score >= f.unlock);
@@ -216,7 +216,9 @@ export default function GamePage() {
     };
 
     const spawnFruit = () => {
-      const pepper = g.caught >= 4 && Math.random() < 0.16;
+      // Fruit bowl is a pure scoring window: no peppers while it runs, and
+      // they resume the moment it drops.
+      const pepper = g.caught >= 4 && g.fx.bowl <= 0 && Math.random() < 0.16;
 
       if (pepper) {
         const scorpion = g.score >= SCORPION_SCORE && Math.random() < 0.18;
@@ -315,6 +317,39 @@ export default function GamePage() {
       g.rings.push({ x, y, r: 8, life: 0.75, max: 0.75, color, delay: delay || 0 });
     };
 
+    const puff = (x, y) => {
+      for (let i = 0; i < 4; i++) {
+        g.bits.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 150,
+          vy: -Math.random() * 120 - 20,
+          life: 0.4,
+          color: "#ffffff",
+          r: 1.5 + Math.random() * 2.5,
+        });
+      }
+    };
+
+    // Fruit bowl leaves a crowded screen behind. When it ends, wipe what is
+    // still falling so the speed coming back does not bury you. Power-ups are
+    // left alone, and nothing cleared this way costs a life.
+    const sweep = () => {
+      let cleared = 0;
+      for (let i = g.fruits.length - 1; i >= 0; i--) {
+        if (g.fruits[i].kind === "power") continue;
+        const f = g.fruits[i];
+        g.fruits.splice(i, 1);
+        if (cleared < 8) puff(f.x, f.y);
+        cleared += 1;
+      }
+      if (cleared > 0) {
+        ring(g.bowl.x, g.bowl.y, "#ffffff", 0);
+        ring(g.bowl.x, g.bowl.y, POWERS.bowl.color, 0.12);
+        pop(g.w / 2, g.h * 0.42, "Cleared", "#ffffff", 20);
+      }
+    };
+
     const pop = (x, y, text, color, size) => {
       g.pops.push({ x, y, text, color, life: 0.8, size: size || 18 });
       if (g.pops.length > 12) g.pops.shift();
@@ -342,9 +377,11 @@ export default function GamePage() {
     const update = (dt) => {
       g.elapsed += dt;
 
+      const bowlWasUp = g.fx.bowl > 0;
       for (const key of TIMED_KEYS) {
         if (g.fx[key] > 0) g.fx[key] = Math.max(0, g.fx[key] - dt);
       }
+      if (bowlWasUp && g.fx.bowl <= 0) sweep();
 
       // sky steps every SKY_STEP points, then eases toward the new hue
       const step = Math.min(SKY_END / SKY_STEP, Math.floor(g.score / SKY_STEP));
@@ -364,7 +401,8 @@ export default function GamePage() {
       if (g.nextDrop <= 0) {
         spawnFruit();
         if (g.fx.bowl > 0) spawnFruit(); // Fruit bowl doubles the drop
-        g.nextDrop = Math.max(330, 950 - g.elapsed * 21 - g.caught * 11);
+        // same curve stretched by a fifth, so drops arrive 20% less often
+        g.nextDrop = Math.max(412, 1188 - g.elapsed * 26 - g.caught * 14);
       }
 
       // One power-up on screen at a time: the first around 10s in, then every
@@ -431,10 +469,11 @@ export default function GamePage() {
                 setLives(g.lives);
                 pop(f.x, rimY - 14, "+1 Health", spec.color, 19);
               } else {
-                // already topped up, pay it out instead of wasting the drop
+                // already at full health: no extra heart is banked, so the
+                // drop pays out in points instead of being wasted
                 g.score += 100;
                 setScore(g.score);
-                pop(f.x, rimY - 14, "+100", spec.color, 19);
+                pop(f.x, rimY - 14, "Full health +100", spec.color, 18);
               }
             } else {
               g.fx[f.power] = spec.seconds; // refreshes rather than stacks
@@ -1153,7 +1192,7 @@ export default function GamePage() {
               </li>
               <li>
                 <b style={{ color: POWERS.health.color }}>+1 Health</b> — one heart
-                back, up to five.
+                back. At full health it pays 100 points instead.
               </li>
               <li>
                 <b style={{ color: POWERS.shield.color }}>Shield</b> — dropped fruit
