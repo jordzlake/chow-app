@@ -33,6 +33,7 @@ export default function GamePage() {
   const [lives, setLives] = useState(START_LIVES);
   const [best, setBest] = useState(0);
   const [active, setActive] = useState([]); // live power-up timers for the HUD
+  const [hurt, setHurt] = useState(0); // timestamp of the last hit, keys the flash
 
   const [name, setName] = useState("");
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
@@ -199,6 +200,7 @@ export default function GamePage() {
         skin: pepper ? "#a51414" : kind.skin,
         spin: (Math.random() - 0.5) * 2.4,
         rot: Math.random() * Math.PI,
+        seed: Math.random() * 12,
         vy: fallSpeed(),
       });
     };
@@ -259,6 +261,7 @@ export default function GamePage() {
       g.lives -= 1;
       g.shake = 0.3;
       setLives(g.lives);
+      setHurt(performance.now()); // restarts the red edge flash
       if (g.lives <= 0) end();
     };
 
@@ -313,6 +316,20 @@ export default function GamePage() {
         const crossedRim = f.prevBottom <= rimY && bottom >= rimY;
         const overBowl = Math.abs(f.x - g.bowl.x) <= half;
 
+        // embers trail off a burning pepper
+        if (f.kind === "pepper" && Math.random() < dt * 14) {
+          g.bits.push({
+            x: f.x + (Math.random() - 0.5) * f.r,
+            y: f.y - f.r * 0.9,
+            vx: (Math.random() - 0.5) * 40,
+            vy: -30 - Math.random() * 50,
+            life: 0.45,
+            rise: true,
+            color: Math.random() < 0.5 ? "#ffd84d" : "#ff8a1e",
+            r: 1.5 + Math.random() * 2,
+          });
+        }
+
         if (crossedRim && overBowl) {
           g.fruits.splice(i, 1);
 
@@ -323,8 +340,14 @@ export default function GamePage() {
             burst(f.x, rimY, spec.color);
             pop(f.x, rimY - 14, spec.label, spec.color, 19);
           } else if (f.kind === "pepper") {
-            burst(f.x, rimY, "#e02020");
-            loseLife(f.x, rimY);
+            if (g.fx.mango > 0) {
+              // Catch all is a fire of its own; peppers burn up harmlessly.
+              burst(f.x, rimY, "#ffb020");
+              pop(f.x, rimY - 12, "Burned up", "#ffd84d", 17);
+            } else {
+              burst(f.x, rimY, "#e02020");
+              loseLife(f.x, rimY);
+            }
           } else {
             g.caught += 1;
             g.score += f.points;
@@ -350,7 +373,7 @@ export default function GamePage() {
           g.bits.splice(i, 1);
           continue;
         }
-        b.vy += 900 * dt;
+        b.vy += (b.rise ? -190 : 900) * dt;
         b.x += b.vx * dt;
         b.y += b.vy * dt;
       }
@@ -424,18 +447,81 @@ export default function GamePage() {
       ctx.fill();
     };
 
-    const drawPepper = (f) => {
-      ctx.fillStyle = f.flesh;
+    // A rounded, curling flame. `sway` bends the tip so each one flickers on
+    // its own phase instead of the whole fire pulsing as a single shape.
+    const tongue = (x, baseY, w, h, sway, color) => {
+      ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.ellipse(0, 0, f.r * 0.58, f.r, 0.35, 0, Math.PI * 2);
+      ctx.moveTo(x - w, baseY);
+      ctx.bezierCurveTo(
+        x - w * 1.15, baseY - h * 0.4,
+        x - w * 0.85 + sway * 0.5, baseY - h * 0.76,
+        x + sway, baseY - h
+      );
+      ctx.bezierCurveTo(
+        x + w * 0.9 + sway * 0.5, baseY - h * 0.72,
+        x + w * 1.15, baseY - h * 0.36,
+        x + w, baseY
+      );
+      ctx.quadraticCurveTo(x, baseY + h * 0.14, x - w, baseY);
+      ctx.closePath();
+      ctx.fill();
+    };
+
+    const drawPepper = (f) => {
+      const r = f.r;
+      const t = g.elapsed;
+      const a = Math.sin(t * 13 + f.seed);
+      const b = Math.sin(t * 9.3 + f.seed * 2.4 + 1.1);
+      const c = Math.sin(t * 17 + f.seed * 1.7 + 2.2);
+
+      // heat halo, dark enough to hold up on both the yellow sky and teal ground
+      ctx.fillStyle = "rgba(200,25,0,0.15)";
+      ctx.beginPath();
+      ctx.arc(0, -r * 0.45, r * (1.35 + (a + 1) * 0.07), 0, Math.PI * 2);
+      ctx.fill();
+
+      // three separate red tongues at different heights and phases
+      tongue(-r * 0.52, -r * 0.1, r * 0.36, r * (1.05 + (b + 1) * 0.3), b * r * 0.22, "#ff2d00");
+      tongue(r * 0.5, -r * 0.16, r * 0.34, r * (0.9 + (c + 1) * 0.3), c * r * 0.22, "#ff2d00");
+      tongue(-r * 0.06, -r * 0.42, r * 0.52, r * (1.5 + (a + 1) * 0.34), a * r * 0.24, "#ff2d00");
+      // orange layer, offset so it never nests concentrically inside the red
+      tongue(-r * 0.3, -r * 0.26, r * 0.26, r * (0.8 + (c + 1) * 0.26), c * r * 0.16, "#ff8a1e");
+      tongue(r * 0.22, -r * 0.34, r * 0.24, r * (0.95 + (a + 1) * 0.26), a * r * 0.16, "#ff8a1e");
+      tongue(-r * 0.02, -r * 0.5, r * 0.3, r * (0.95 + (b + 1) * 0.28), b * r * 0.18, "#ffb020");
+
+      // the pepper itself, in front so it stays recognisable
+      ctx.save();
+      ctx.rotate(f.rot * 0.16);
+      ctx.fillStyle = "#7a0b0b";
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.12, r * 0.62, r * 1.0, 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#d21414";
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.06, r * 0.58, r * 0.95, 0.22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(64,0,0,0.7)";
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.06, r * 0.58, r * 0.95, 0.22, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,205,150,0.6)";
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.22, -r * 0.08, r * 0.11, r * 0.4, 0.22, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = "#2f7d32";
-      ctx.lineWidth = Math.max(3, f.r * 0.2);
+      ctx.lineWidth = Math.max(3, r * 0.19);
       ctx.lineCap = "round";
       ctx.beginPath();
-      ctx.moveTo(-f.r * 0.3, -f.r * 0.85);
-      ctx.lineTo(-f.r * 0.05, -f.r * 1.3);
+      ctx.moveTo(-r * 0.2, -r * 0.82);
+      ctx.lineTo(0, -r * 1.2);
       ctx.stroke();
+      ctx.restore();
+
+      // bright licks in front of the shoulders
+      tongue(-r * 0.34, -r * 0.3, r * 0.17, r * (0.55 + (c + 1) * 0.2), c * r * 0.1, "#ffd84d");
+      tongue(r * 0.3, -r * 0.4, r * 0.15, r * (0.5 + (b + 1) * 0.2), b * r * 0.1, "#ffe9a0");
     };
 
     const drawPower = (f) => {
@@ -532,7 +618,9 @@ export default function GamePage() {
     const drawItem = (f) => {
       ctx.save();
       ctx.translate(f.x, f.y);
-      if (f.kind !== "power") ctx.rotate(f.rot * 0.25);
+      // Only round fruit tumbles. Peppers rotate their body internally so the
+      // flames keep pointing up, and power-ups stay level to stay readable.
+      if (f.kind === "fruit") ctx.rotate(f.rot * 0.25);
       if (f.kind === "power") drawPower(f);
       else if (f.kind === "pepper") drawPepper(f);
       else drawCitrus(f);
@@ -697,6 +785,7 @@ export default function GamePage() {
     setScore(0);
     setLives(START_LIVES);
     setActive([]);
+    setHurt(0);
     setBoardOpen(false);
     setPhase("playing");
   }, []);
@@ -753,14 +842,18 @@ export default function GamePage() {
     <main className="game" ref={wrapRef}>
       <canvas ref={canvasRef} className="game__canvas" />
 
+      {hurt > 0 && <div className="flash" key={hurt} />}
+
       <div className="hud">
         <div className="hud__chip">
-          Score <span className="hud__value">{score}</span>
+          <span className="hud__cap">Score</span>
+          <span className="hud__value">{score}</span>
         </div>
         <div className="hud__chip">
+          <span className="hud__cap">Health</span>
           <span className="hud__lives">
-            {"●".repeat(Math.max(0, lives))}
-            {"○".repeat(Math.max(0, START_LIVES - lives))}
+            <b>{"♥".repeat(Math.max(0, lives))}</b>
+            <i>{"♡".repeat(Math.max(0, START_LIVES - lives))}</i>
           </span>
         </div>
         <Link href="/" className="hud__back">
@@ -819,8 +912,8 @@ export default function GamePage() {
                 Kumquat 60
               </li>
               <li className="rules__row">
-                <span className="rules__dot" style={{ background: "#e02020" }} />
-                Pepper costs a life
+                <span className="rules__dot" style={{ background: "#d81414" }} />
+                Burning pepper costs a life
               </li>
             </ul>
 
@@ -828,7 +921,8 @@ export default function GamePage() {
             <ul className="rules rules--stack">
               <li>
                 <b style={{ color: POWERS.mango.color }}>Catch all</b> — bowl spans
-                the screen, fruit falls faster. 5s
+                the screen and peppers burn up harmlessly, but fruit falls
+                faster. 5s
               </li>
               <li>
                 <b style={{ color: POWERS.speed.color }}>Quick hands</b> — the bowl

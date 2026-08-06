@@ -182,9 +182,10 @@ input {
 
 .hud__chip {
   display: flex;
-  align-items: baseline;
-  gap: 7px;
-  padding: 7px 14px;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 5px 15px 7px;
   border-radius: var(--radius);
   background: rgba(91, 44, 141, 0.9);
   color: var(--paper);
@@ -500,4 +501,57 @@ input {
   border-radius: 50%;
   border: 2px solid rgba(0, 0, 0, 0.25);
   flex: none;
+}
+
+/* HUD chip labels */
+
+.hud__cap {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 248, 230, 0.72);
+  line-height: 1.2;
+}
+
+.hud__lives b,
+.hud__lives i {
+  font-style: normal;
+}
+
+.hud__lives b {
+  color: #ff5e6c;
+}
+
+.hud__lives i {
+  color: rgba(255, 248, 230, 0.4);
+}
+
+/* red edge flash when something actually hurts */
+
+.flash {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  box-shadow: inset 0 0 58px 8px rgba(226, 28, 48, 0.62);
+  animation: hurtFade 460ms ease-out forwards;
+}
+
+@keyframes hurtFade {
+  0% {
+    opacity: 0.35;
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flash {
+    animation-duration: 300ms;
+  }
 }
