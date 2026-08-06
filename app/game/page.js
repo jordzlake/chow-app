@@ -3,13 +3,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
-const CITRUS = [
-  { flesh: "#7cb518", skin: "#5d8c0e", name: "lime" },
-  { flesh: "#ffd500", skin: "#d9a900", name: "lemon" },
-  { flesh: "#ff8a1e", skin: "#d96a00", name: "orange" },
-  { flesh: "#ff5e5b", skin: "#c93a37", name: "grapefruit" },
+/* Smaller fruit is worth more. `unlock` is how many catches it takes before
+   that size joins the mix, so the drop pool gets finer as the run goes on. */
+const FRUITS = [
+  { key: "grapefruit", scale: 1.3, points: 5, flesh: "#ff5e5b", skin: "#c93a37", unlock: 0, weight: 2 },
+  { key: "orange", scale: 1.0, points: 10, flesh: "#ff8a1e", skin: "#d96a00", unlock: 0, weight: 4 },
+  { key: "lemon", scale: 0.86, points: 15, flesh: "#ffd500", skin: "#d9a900", unlock: 6, weight: 3 },
+  { key: "lime", scale: 0.66, points: 30, flesh: "#7cb518", skin: "#5d8c0e", unlock: 14, weight: 3 },
+  { key: "kumquat", scale: 0.46, points: 60, flesh: "#ffa41e", skin: "#d97a00", unlock: 26, weight: 2 },
 ];
 
+const POWERS = {
+  mango: { label: "Catch all", seconds: 5, color: "#ff8a1e" },
+  speed: { label: "Quick hands", seconds: 5, color: "#ffd500" },
+  shield: { label: "Shield", seconds: 3, color: "#17a9a0" },
+  bowl: { label: "Fruit bowl", seconds: 6, color: "#ec1163" },
+};
+
+const POWER_KEYS = Object.keys(POWERS);
 const START_LIVES = 3;
 
 export default function GamePage() {
@@ -17,10 +28,11 @@ export default function GamePage() {
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
 
-  const [phase, setPhase] = useState("ready"); // ready | playing | over
+  const [phase, setPhase] = useState("ready"); // ready | playing | paused | over
   const [score, setScore] = useState(0);
   const [lives, setLives] = useState(START_LIVES);
   const [best, setBest] = useState(0);
+  const [active, setActive] = useState([]); // live power-up timers for the HUD
 
   const [name, setName] = useState("");
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
@@ -51,14 +63,20 @@ export default function GamePage() {
       phase: "ready",
       fruits: [],
       bits: [],
-      bowl: { x: 0, y: 0, w: 120, h: 46, target: 0 },
+      pops: [],
+      bowl: { x: 0, y: 0, w: 120, baseW: 120, h: 46, target: 0 },
+      fx: { mango: 0, speed: 0, shield: 0, bowl: 0 },
       dragging: false,
       elapsed: 0,
       caught: 0,
       lives: START_LIVES,
       score: 0,
       nextDrop: 0,
+      nextPower: 0,
+      powerOut: false,
       shake: 0,
+      hudTick: 0,
+      hudSig: "",
       raf: 0,
       last: 0,
     };
@@ -75,14 +93,22 @@ export default function GamePage() {
       canvas.height = Math.round(rect.height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      g.bowl.w = Math.max(94, Math.min(g.w * 0.3, 170));
-      g.bowl.h = g.bowl.w * 0.4;
+      g.bowl.baseW = Math.max(94, Math.min(g.w * 0.3, 170));
+      g.bowl.h = g.bowl.baseW * 0.4; // height stays put even when Catch all widens the bowl
       g.bowl.y = g.h - g.bowl.h - Math.max(56, g.h * 0.11);
+      if (g.fx.mango <= 0) g.bowl.w = g.bowl.baseW;
       if (!g.bowl.x) {
         g.bowl.x = g.w / 2;
         g.bowl.target = g.w / 2;
       }
       clampBowl();
+
+      // A rotation or keyboard resize changes the reachable band, so pull any
+      // fruit already falling back inside it.
+      for (const f of g.fruits) {
+        const { lo, hi } = dropRange(f.r);
+        f.x = Math.max(lo, Math.min(hi, f.x));
+      }
     };
 
     const clampBowl = () => {
@@ -123,27 +149,79 @@ export default function GamePage() {
 
     /* ---------------------------------------------------------- spawn */
 
-    const spawn = () => {
-      const r = Math.max(15, Math.min(g.w, 460) * 0.055);
+    // Fruit only drops where the bowl can sit centred under it. The bowl's
+    // centre is clamped to [half, w - half], so anything outside that band
+    // needs the bowl pinned against a wall to reach. The fruit's own radius is
+    // taken off both ends again so no fruit is ever clipped by the screen.
+    // Always measured against the base width, never the widened Catch all bowl.
+    const dropRange = (r) => {
+      const half = g.bowl.baseW / 2;
+      const edge = r + 10;
+      const lo = Math.max(edge, half);
+      const hi = Math.min(g.w - edge, g.w - half);
+      return hi > lo ? { lo, hi } : { lo: g.w / 2, hi: g.w / 2 };
+    };
+
+    const baseRadius = () => Math.max(15, Math.min(g.w, 460) * 0.055);
+
+    const fallSpeed = () =>
+      (215 + g.elapsed * 13 + g.caught * 9) * g.unit * (0.9 + Math.random() * 0.25);
+
+    const pickFruit = () => {
+      const pool = FRUITS.filter((f) => g.caught >= f.unlock);
+      const total = pool.reduce((sum, f) => sum + f.weight, 0);
+      let roll = Math.random() * total;
+      for (const f of pool) {
+        roll -= f.weight;
+        if (roll <= 0) return f;
+      }
+      return pool[pool.length - 1];
+    };
+
+    const place = (r) => {
+      const { lo, hi } = dropRange(r);
+      return lo + Math.random() * (hi - lo);
+    };
+
+    const spawnFruit = () => {
       const pepper = g.caught >= 4 && Math.random() < 0.16;
-      const kind = CITRUS[(Math.random() * CITRUS.length) | 0];
-      const margin = r + 8;
+      const kind = pepper ? null : pickFruit();
+      const r = baseRadius() * (pepper ? 1 : kind.scale);
 
       g.fruits.push({
-        x: margin + Math.random() * Math.max(1, g.w - margin * 2),
+        kind: pepper ? "pepper" : "fruit",
+        x: place(r),
         y: -r * 2,
         prevBottom: -r,
         r,
-        pepper,
+        points: pepper ? 0 : kind.points,
         flesh: pepper ? "#e02020" : kind.flesh,
         skin: pepper ? "#a51414" : kind.skin,
         spin: (Math.random() - 0.5) * 2.4,
         rot: Math.random() * Math.PI,
-        vy:
-          (215 + g.elapsed * 13 + g.caught * 9) *
-          g.unit *
-          (0.9 + Math.random() * 0.25),
+        vy: fallSpeed(),
       });
+    };
+
+    const spawnPower = () => {
+      const key = POWER_KEYS[(Math.random() * POWER_KEYS.length) | 0];
+      const r = baseRadius() * 1.05;
+
+      g.fruits.push({
+        kind: "power",
+        power: key,
+        x: place(r),
+        y: -r * 2,
+        prevBottom: -r,
+        r,
+        points: 0,
+        flesh: POWERS[key].color,
+        skin: "#ffffff",
+        spin: 0,
+        rot: 0,
+        vy: fallSpeed() * 0.62, // drifts down slower so it stays winnable
+      });
+      g.powerOut = true;
     };
 
     const burst = (x, y, color) => {
@@ -161,27 +239,74 @@ export default function GamePage() {
       if (g.bits.length > 90) g.bits.splice(0, g.bits.length - 90);
     };
 
+    const pop = (x, y, text, color, size) => {
+      g.pops.push({ x, y, text, color, life: 0.8, size: size || 18 });
+      if (g.pops.length > 12) g.pops.shift();
+    };
+
     /* --------------------------------------------------------- update */
+
+    // Catch all pushes fruit down harder, Fruit bowl drags it to a crawl.
+    const fallMultiplier = () =>
+      (g.fx.mango > 0 ? 1.5 : 1) * (g.fx.bowl > 0 ? 0.4 : 1);
+
+    const loseLife = (x, y) => {
+      if (g.fx.shield > 0) {
+        burst(x, y, POWERS.shield.color);
+        pop(x, y, "Blocked", POWERS.shield.color, 16);
+        return;
+      }
+      g.lives -= 1;
+      g.shake = 0.3;
+      setLives(g.lives);
+      if (g.lives <= 0) end();
+    };
 
     const update = (dt) => {
       g.elapsed += dt;
 
+      for (const key of POWER_KEYS) {
+        if (g.fx[key] > 0) g.fx[key] = Math.max(0, g.fx[key] - dt);
+      }
+
+      // bowl width eases toward its target so Catch all reads as a sweep
+      const wantW = g.fx.mango > 0 ? g.w : g.bowl.baseW;
+      g.bowl.w += (wantW - g.bowl.w) * Math.min(1, dt * 12);
+      if (Math.abs(wantW - g.bowl.w) < 0.5) g.bowl.w = wantW;
+
       // bowl follows the finger, smoothed just enough to kill jitter
-      g.bowl.x += (g.bowl.target - g.bowl.x) * Math.min(1, dt * 24);
+      const follow = g.fx.speed > 0 ? 46 : 24;
+      g.bowl.x += (g.bowl.target - g.bowl.x) * Math.min(1, dt * follow);
+      clampBowl();
 
       g.nextDrop -= dt * 1000;
       if (g.nextDrop <= 0) {
-        spawn();
+        spawnFruit();
+        if (g.fx.bowl > 0) spawnFruit(); // Fruit bowl doubles the drop
         g.nextDrop = Math.max(330, 950 - g.elapsed * 21 - g.caught * 11);
+      }
+
+      // One power-up on screen at a time: the first around 10s in, then every
+      // 12-19s. With ~5s effects and imperfect catching that leaves an effect
+      // running roughly a fifth of the time, so they stay a treat.
+      g.nextPower -= dt * 1000;
+      if (g.nextPower <= 0 && g.caught >= 3) {
+        if (g.powerOut) {
+          g.nextPower = 1500;
+        } else {
+          spawnPower();
+          g.nextPower = 12000 + Math.random() * 7000;
+        }
       }
 
       const rimY = g.bowl.y;
       const half = g.bowl.w / 2;
+      const mul = fallMultiplier();
 
       for (let i = g.fruits.length - 1; i >= 0; i--) {
         const f = g.fruits[i];
         f.prevBottom = f.y + f.r;
-        f.y += f.vy * dt;
+        f.y += f.vy * mul * dt;
         f.rot += f.spin * dt;
 
         const bottom = f.y + f.r;
@@ -190,16 +315,21 @@ export default function GamePage() {
 
         if (crossedRim && overBowl) {
           g.fruits.splice(i, 1);
-          if (f.pepper) {
-            g.lives -= 1;
-            g.shake = 0.35;
+
+          if (f.kind === "power") {
+            g.powerOut = false;
+            const spec = POWERS[f.power];
+            g.fx[f.power] = spec.seconds; // refreshes rather than stacks
+            burst(f.x, rimY, spec.color);
+            pop(f.x, rimY - 14, spec.label, spec.color, 19);
+          } else if (f.kind === "pepper") {
             burst(f.x, rimY, "#e02020");
-            setLives(g.lives);
-            if (g.lives <= 0) end();
+            loseLife(f.x, rimY);
           } else {
             g.caught += 1;
-            g.score += 10;
+            g.score += f.points;
             burst(f.x, rimY, f.flesh);
+            pop(f.x, rimY - 10, `+${f.points}`, "#fff8e6", f.points >= 30 ? 22 : 17);
             setScore(g.score);
           }
           continue;
@@ -207,12 +337,9 @@ export default function GamePage() {
 
         if (f.y - f.r > g.h + 20) {
           g.fruits.splice(i, 1);
-          if (!f.pepper) {
-            g.lives -= 1;
-            g.shake = 0.25;
-            setLives(g.lives);
-            if (g.lives <= 0) end();
-          }
+          // A missed power-up is just a missed chance, never a lost life.
+          if (f.kind === "power") g.powerOut = false;
+          else if (f.kind === "fruit") loseLife(f.x, g.h - 40);
         }
       }
 
@@ -228,12 +355,39 @@ export default function GamePage() {
         b.y += b.vy * dt;
       }
 
+      for (let i = g.pops.length - 1; i >= 0; i--) {
+        const p = g.pops[i];
+        p.life -= dt;
+        p.y -= 46 * dt;
+        if (p.life <= 0) g.pops.splice(i, 1);
+      }
+
       if (g.shake > 0) g.shake = Math.max(0, g.shake - dt);
+
+      // Feed the HUD ten times a second instead of every frame.
+      g.hudTick += dt;
+      if (g.hudTick >= 0.1) {
+        g.hudTick = 0;
+        const live = POWER_KEYS.filter((k) => g.fx[k] > 0).map((k) => ({
+          key: k,
+          label: POWERS[k].label,
+          color: POWERS[k].color,
+          left: g.fx[k],
+          pct: Math.max(0, Math.min(1, g.fx[k] / POWERS[k].seconds)),
+        }));
+        const sig = live.map((p) => `${p.key}${p.left.toFixed(1)}`).join("|");
+        if (sig !== g.hudSig) {
+          g.hudSig = sig;
+          setActive(live);
+        }
+      }
     };
 
     const end = () => {
       g.phase = "over";
       g.dragging = false;
+      for (const key of POWER_KEYS) g.fx[key] = 0;
+      setActive([]);
       setPhase("over");
       setSaveState("idle");
       setSaveNote("");
@@ -248,27 +402,7 @@ export default function GamePage() {
 
     /* ----------------------------------------------------------- draw */
 
-    const drawFruit = (f) => {
-      ctx.save();
-      ctx.translate(f.x, f.y);
-      ctx.rotate(f.rot * 0.25);
-
-      if (f.pepper) {
-        ctx.fillStyle = f.flesh;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, f.r * 0.58, f.r * 1.0, 0.35, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#2f7d32";
-        ctx.lineWidth = Math.max(3, f.r * 0.2);
-        ctx.lineCap = "round";
-        ctx.beginPath();
-        ctx.moveTo(-f.r * 0.3, -f.r * 0.85);
-        ctx.lineTo(-f.r * 0.05, -f.r * 1.3);
-        ctx.stroke();
-        ctx.restore();
-        return;
-      }
-
+    const drawCitrus = (f) => {
       ctx.fillStyle = f.skin;
       ctx.beginPath();
       ctx.arc(0, f.r * 0.08, f.r, 0, Math.PI * 2);
@@ -288,7 +422,120 @@ export default function GamePage() {
       ctx.beginPath();
       ctx.ellipse(f.r * 0.42, -f.r * 0.72, f.r * 0.3, f.r * 0.15, -0.7, 0, Math.PI * 2);
       ctx.fill();
+    };
 
+    const drawPepper = (f) => {
+      ctx.fillStyle = f.flesh;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, f.r * 0.58, f.r, 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#2f7d32";
+      ctx.lineWidth = Math.max(3, f.r * 0.2);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(-f.r * 0.3, -f.r * 0.85);
+      ctx.lineTo(-f.r * 0.05, -f.r * 1.3);
+      ctx.stroke();
+    };
+
+    const drawPower = (f) => {
+      const r = f.r;
+      const pulse = 1 + Math.sin(g.elapsed * 6) * 0.07;
+
+      ctx.strokeStyle = "rgba(255,255,255,0.75)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.24 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(255,255,255,0.22)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.14, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (f.power === "mango") {
+        ctx.fillStyle = "#e2571f";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, r * 0.78, r * 0.95, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ffb020";
+        ctx.beginPath();
+        ctx.ellipse(-r * 0.14, r * 0.1, r * 0.5, r * 0.62, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#3f7d1f";
+        ctx.beginPath();
+        ctx.ellipse(r * 0.4, -r * 0.72, r * 0.34, r * 0.14, -0.6, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+
+      if (f.power === "speed") {
+        ctx.fillStyle = "#ffd500";
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#5b2c8d";
+        ctx.beginPath();
+        ctx.moveTo(r * 0.12, -r * 0.62);
+        ctx.lineTo(-r * 0.34, r * 0.1);
+        ctx.lineTo(-r * 0.02, r * 0.1);
+        ctx.lineTo(-r * 0.16, r * 0.66);
+        ctx.lineTo(r * 0.36, -r * 0.12);
+        ctx.lineTo(r * 0.02, -r * 0.12);
+        ctx.closePath();
+        ctx.fill();
+        return;
+      }
+
+      if (f.power === "shield") {
+        ctx.fillStyle = "#17a9a0";
+        ctx.beginPath();
+        ctx.moveTo(0, -r * 0.85);
+        ctx.lineTo(r * 0.68, -r * 0.45);
+        ctx.quadraticCurveTo(r * 0.68, r * 0.5, 0, r * 0.88);
+        ctx.quadraticCurveTo(-r * 0.68, r * 0.5, -r * 0.68, -r * 0.45);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "#fff8e6";
+        ctx.lineWidth = Math.max(2.5, r * 0.14);
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.26, r * 0.02);
+        ctx.lineTo(-r * 0.04, r * 0.28);
+        ctx.lineTo(r * 0.32, -r * 0.32);
+        ctx.stroke();
+        return;
+      }
+
+      // fruit bowl
+      ctx.fillStyle = "#ec1163";
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.82, -r * 0.02);
+      ctx.quadraticCurveTo(-r * 0.74, r * 0.86, 0, r * 0.86);
+      ctx.quadraticCurveTo(r * 0.74, r * 0.86, r * 0.82, -r * 0.02);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#fff8e6";
+      ctx.beginPath();
+      ctx.ellipse(0, -r * 0.02, r * 0.82, r * 0.16, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#7cb518";
+      ctx.beginPath();
+      ctx.arc(-r * 0.32, -r * 0.3, r * 0.26, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ff8a1e";
+      ctx.beginPath();
+      ctx.arc(r * 0.22, -r * 0.36, r * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    const drawItem = (f) => {
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      if (f.kind !== "power") ctx.rotate(f.rot * 0.25);
+      if (f.kind === "power") drawPower(f);
+      else if (f.kind === "pepper") drawPepper(f);
+      else drawCitrus(f);
       ctx.restore();
     };
 
@@ -330,6 +577,23 @@ export default function GamePage() {
       ctx.beginPath();
       ctx.ellipse(x, y + h * 0.02, w * 0.41, h * 0.12, 0, 0, Math.PI * 2);
       ctx.fill();
+
+      // shield dome
+      if (g.fx.shield > 0) {
+        const fade = Math.min(1, g.fx.shield / 0.6);
+        ctx.globalAlpha = 0.4 * fade;
+        ctx.fillStyle = "#17a9a0";
+        ctx.beginPath();
+        ctx.ellipse(x, y, w * 0.56, h * 1.5, 0, Math.PI, 0);
+        ctx.fill();
+        ctx.globalAlpha = 0.9 * fade;
+        ctx.strokeStyle = "#fff8e6";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.ellipse(x, y, w * 0.56, h * 1.5, 0, Math.PI, 0);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
       ctx.restore();
     };
 
@@ -340,7 +604,7 @@ export default function GamePage() {
         ctx.translate((Math.random() - 0.5) * g.shake * 22, (Math.random() - 0.5) * g.shake * 14);
       }
 
-      for (const f of g.fruits) drawFruit(f);
+      for (const f of g.fruits) drawItem(f);
 
       for (const b of g.bits) {
         ctx.globalAlpha = Math.max(0, b.life / 0.55);
@@ -352,6 +616,20 @@ export default function GamePage() {
       ctx.globalAlpha = 1;
 
       drawBowl();
+
+      ctx.textAlign = "center";
+      ctx.lineJoin = "round";
+      for (const p of g.pops) {
+        ctx.globalAlpha = Math.max(0, Math.min(1, p.life / 0.5));
+        ctx.font = `800 ${p.size}px Nunito, system-ui, sans-serif`;
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "rgba(38,8,60,0.85)";
+        ctx.strokeText(p.text, p.x, p.y);
+        ctx.fillStyle = p.color;
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.globalAlpha = 1;
+
       ctx.restore();
     };
 
@@ -401,17 +679,24 @@ export default function GamePage() {
     if (!g) return;
     g.fruits = [];
     g.bits = [];
+    g.pops = [];
     g.elapsed = 0;
     g.caught = 0;
     g.score = 0;
     g.lives = START_LIVES;
     g.nextDrop = 500;
+    g.nextPower = 10000;
+    g.powerOut = false;
     g.shake = 0;
+    g.hudSig = "";
+    for (const key of POWER_KEYS) g.fx[key] = 0;
+    g.bowl.w = g.bowl.baseW;
     g.bowl.target = g.w / 2;
     g.bowl.x = g.w / 2;
     g.phase = "playing";
     setScore(0);
     setLives(START_LIVES);
+    setActive([]);
     setBoardOpen(false);
     setPhase("playing");
   }, []);
@@ -483,24 +768,83 @@ export default function GamePage() {
         </Link>
       </div>
 
+      {phase === "playing" && active.length > 0 && (
+        <div className="powers">
+          {active.map((p) => (
+            <span
+              key={p.key}
+              className="power"
+              style={{ color: p.color, borderColor: p.color }}
+            >
+              {p.label} <b className="power__time">{p.left.toFixed(1)}s</b>
+              <i className="power__fill" style={{ width: `${p.pct * 100}%` }} />
+            </span>
+          ))}
+        </div>
+      )}
+
       {phase === "ready" && (
         <div className="veil">
           <div className="panel">
             <h1 className="panel__title">Catch the Citrus</h1>
             <p className="panel__text">
-              Drag anywhere to slide the bowl. Every catch is 10 points, and the
-              fruit keeps coming faster.
+              Drag anywhere to slide the bowl. The fruit gets smaller and faster
+              as you go, and small fruit pays the most.
             </p>
-            <div className="legend">
-              <span className="legend__item">
-                <span className="legend__dot" style={{ background: "#7cb518" }} />
-                Catch
-              </span>
-              <span className="legend__item">
-                <span className="legend__dot" style={{ background: "#e02020" }} />
+
+            <ul className="rules">
+              <li className="rules__row">
+                <span className="rules__dot" style={{ background: "#ff5e5b" }} />
+                Grapefruit 5
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "#ff8a1e", width: 13, height: 13 }}
+                />
+                Orange 10
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "#7cb518", width: 10, height: 10 }}
+                />
+                Lime 30
+              </li>
+              <li className="rules__row">
+                <span
+                  className="rules__dot"
+                  style={{ background: "#ffa41e", width: 8, height: 8 }}
+                />
+                Kumquat 60
+              </li>
+              <li className="rules__row">
+                <span className="rules__dot" style={{ background: "#e02020" }} />
                 Pepper costs a life
-              </span>
-            </div>
+              </li>
+            </ul>
+
+            <p className="panel__label">Power-ups</p>
+            <ul className="rules rules--stack">
+              <li>
+                <b style={{ color: POWERS.mango.color }}>Catch all</b> — bowl spans
+                the screen, fruit falls faster. 5s
+              </li>
+              <li>
+                <b style={{ color: POWERS.speed.color }}>Quick hands</b> — the bowl
+                tracks your finger faster. 5s
+              </li>
+              <li>
+                <b style={{ color: POWERS.shield.color }}>Shield</b> — drops cost
+                you nothing. 3s
+              </li>
+              <li>
+                <b style={{ color: POWERS.bowl.color }}>Fruit bowl</b> — double the
+                fruit at 40% speed. 6s
+              </li>
+            </ul>
+            <p className="panel__text">Miss a power-up and nothing happens.</p>
+
             <button className="btn" onClick={start}>
               Start
             </button>
