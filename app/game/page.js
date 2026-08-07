@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { createAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
    the pool, so the drop mix widens as the run goes rather than all at once.
@@ -46,6 +47,7 @@ export default function GamePage() {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
+  const audioRef = useRef(null);
 
   const [phase, setPhase] = useState("ready"); // ready | playing | paused | over
   const [score, setScore] = useState(0);
@@ -60,11 +62,15 @@ export default function GamePage() {
   const [saveNote, setSaveNote] = useState("");
   const [board, setBoard] = useState(null);
   const [boardOpen, setBoardOpen] = useState(false);
+  const [howTo, setHowTo] = useState(false);
+  const [booting, setBooting] = useState(false); // audio is loading
+  const [muted, setMuted] = useState(false);
 
   useEffect(() => {
     try {
       setName(localStorage.getItem("chow-name") || "");
       setBest(Number(localStorage.getItem("chow-best") || 0));
+      setMuted(localStorage.getItem("chow-muted") === "1");
     } catch {}
   }, []);
 
@@ -377,6 +383,7 @@ export default function GamePage() {
         ring(g.bowl.x, g.bowl.y, "#ffffff", 0);
         ring(g.bowl.x, g.bowl.y, POWERS[endedKey || "bowl"].color, 0.12);
         pop(g.w / 2, g.h * 0.42, "Cleared", "#ffffff", 20);
+        audioRef.current?.sweep();
       }
     };
 
@@ -399,10 +406,12 @@ export default function GamePage() {
         return;
       }
       if (g.fx.shield > 0) {
+        audioRef.current?.block();
         burst(x, y, POWERS.shield.color);
         pop(x, y, "Blocked", POWERS.shield.color, 16);
         return;
       }
+      audioRef.current?.miss();
       g.lives -= 1;
       g.shake = 0.3;
       setLives(g.lives);
@@ -531,6 +540,7 @@ export default function GamePage() {
                 g.lives += 1;
                 setLives(g.lives);
                 setHeal(performance.now()); // green edge glow
+                audioRef.current?.heal();
                 pop(f.x, rimY - 14, "+1 Health", spec.color, 19);
               } else {
                 // already at full health: no extra heart is banked, so the
@@ -541,11 +551,13 @@ export default function GamePage() {
               }
             } else {
               g.fx[f.power] = spec.seconds; // refreshes rather than stacks
+              audioRef.current?.power();
               pop(f.x, rimY - 14, spec.label, spec.color, 19);
             }
           } else if (f.kind === "bonus") {
             g.score += f.points;
             setScore(g.score);
+            audioRef.current?.bonus();
             burst(f.x, rimY, "#ffd400");
             burst(f.x, rimY, "#ffffff");
             ring(f.x, rimY, "#ffe14d", 0);
@@ -555,10 +567,12 @@ export default function GamePage() {
           } else if (f.kind === "pepper") {
             if (g.fx.mango > 0) {
               // Catch all is a fire of its own; peppers burn up harmlessly.
+              audioRef.current?.block();
               burst(f.x, rimY, "#ffb020");
               pop(f.x, rimY - 12, "Burned up", "#ffd84d", 17);
             } else if (f.scorpion) {
               // Nothing survives a scorpion. Shield does not cover this.
+              audioRef.current?.scorpion();
               burst(f.x, rimY, "#ff2424");
               ring(f.x, rimY, "#ff2424", 0);
               g.lives = 0;
@@ -568,12 +582,14 @@ export default function GamePage() {
               pop(f.x, rimY - 14, "Scorpion!", "#ff5e6c", 22);
               end();
             } else {
+              audioRef.current?.pepper();
               burst(f.x, rimY, "#e02020");
               loseLife(f.x, rimY);
             }
           } else {
             g.caught += 1;
             g.score += f.points;
+            audioRef.current?.catchFruit();
             burst(f.x, rimY, f.flesh);
             pop(f.x, rimY - 10, `+${f.points}`, "#ffffff", f.points >= 30 ? 22 : 17);
             setScore(g.score);
@@ -650,6 +666,7 @@ export default function GamePage() {
     };
 
     const end = () => {
+      audioRef.current?.duckMusic();
       g.phase = "over";
       g.dragging = false;
       for (const key of TIMED_KEYS) g.fx[key] = 0;
@@ -1271,6 +1288,8 @@ export default function GamePage() {
     document.addEventListener("visibilitychange", onHide);
 
     return () => {
+      audioRef.current?.dispose();
+      audioRef.current = null;
       cancelAnimationFrame(g.raf);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("orientationchange", onResize);
@@ -1284,9 +1303,56 @@ export default function GamePage() {
 
   /* ------------------------------------------------------------- actions */
 
+  // Started from a real click so the AudioContext is created with a user
+  // gesture in hand. Tone is imported behind the loading screen; if it fails
+  // or takes too long, play begins silently rather than blocking the game.
+  const boot = useCallback(async () => {
+    if (audioRef.current) {
+      start();
+      return;
+    }
+    setBooting(true);
+
+    let raw = null;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) {
+        raw = new Ctx();
+        if (raw.state === "suspended") raw.resume();
+      }
+    } catch {}
+
+    try {
+      const audio = await Promise.race([
+        createAudio(raw),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 8000)),
+      ]);
+      audioRef.current = audio;
+      audio.setMuted(muted);
+      audio.startMusic();
+    } catch {
+      audioRef.current = null; // silent fallback, the game still plays
+    }
+
+    setBooting(false);
+    start();
+  }, [muted]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleMute = useCallback(() => {
+    setMuted((m) => {
+      const next = !m;
+      audioRef.current?.setMuted(next);
+      try {
+        localStorage.setItem("chow-muted", next ? "1" : "0");
+      } catch {}
+      return next;
+    });
+  }, []);
+
   const start = useCallback(() => {
     const g = gameRef.current;
     if (!g) return;
+    audioRef.current?.startMusic();
     g.fruits = [];
     g.bits = [];
     g.pops = [];
@@ -1313,6 +1379,7 @@ export default function GamePage() {
     setHurt(0);
     setHeal(0);
     setBoardOpen(false);
+    setHowTo(false);
     setPhase("playing");
   }, []);
 
@@ -1371,6 +1438,24 @@ export default function GamePage() {
       {hurt > 0 && <div className="flash" key={`hurt-${hurt}`} />}
       {heal > 0 && <div className="flash flash--heal" key={`heal-${heal}`} />}
 
+      {booting && (
+        <div className="veil veil--boot">
+          <div className="boot">
+            <div className="boot__bowl" />
+            <p className="boot__text">Warming up the steel pan...</p>
+          </div>
+        </div>
+      )}
+
+      <button
+        className="mute"
+        onClick={toggleMute}
+        aria-label={muted ? "Unmute" : "Mute"}
+        aria-pressed={muted}
+      >
+        {muted ? "\u2715 Sound" : "\u266a Sound"}
+      </button>
+
       <div className="hud">
         <div className="hud__chip">
           <span className="hud__cap">Score</span>
@@ -1412,6 +1497,19 @@ export default function GamePage() {
               climbs, and the smaller it is the more it pays.
             </p>
 
+            <button className="btn" onClick={boot} disabled={booting}>
+              {booting ? "Loading..." : "Start"}
+            </button>
+            <button
+              className="btn btn--ghost"
+              onClick={() => setHowTo((v) => !v)}
+              aria-expanded={howTo}
+            >
+              {howTo ? "Hide how to play" : "How to play"}
+            </button>
+
+            {howTo && (
+              <div className="howto">
             <ul className="rules">
               <li className="rules__row">
                 <span className="rules__dot" style={{ background: "hsl(2,78%,60%)" }} />
@@ -1506,14 +1604,13 @@ export default function GamePage() {
                 fruit at 40% speed, no peppers, and drops are free. 10s
               </li>
             </ul>
-            <p className="panel__text">
+                          <p className="panel__text">
               Miss a power-up and nothing happens. Every power-up clears the
               screen when it ends.
             </p>
+              </div>
+            )}
 
-            <button className="btn" onClick={start}>
-              Start
-            </button>
             {best > 0 && <p className="panel__text">Your best so far: {best}</p>}
             <Link href="/" className="btn btn--ghost">
               Back to poster
@@ -1557,7 +1654,7 @@ export default function GamePage() {
                     ))}
                   </ol>
                 )}
-                <button className="btn" onClick={start}>
+                <button className="btn" onClick={boot}>
                   Play again
                 </button>
                 <button className="btn btn--ghost" onClick={() => setBoardOpen(false)}>
@@ -1602,7 +1699,7 @@ export default function GamePage() {
                     ? "Score saved"
                     : "Save my score"}
                 </button>
-                <button className="btn btn--sea" onClick={start}>
+                <button className="btn btn--sea" onClick={boot}>
                   Play again
                 </button>
                 <button className="btn btn--ghost" onClick={openBoard}>
