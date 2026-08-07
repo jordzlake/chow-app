@@ -42,6 +42,16 @@ const PROGRESSIONS = {
     ],
     roots: ["D2", "B1", "E2", "A1"],
   },
+  // Slow and minor, for menus.
+  minor: {
+    chords: [
+      ["A3", "C4", "E4", "G4"], // Am7
+      ["D3", "F3", "A3", "C4"], // Dm7
+      ["F3", "A3", "C4", "E4"], // Fmaj7
+      ["E3", "G#3", "B3", "D4"], // E7
+    ],
+    roots: ["A1", "D2", "F2", "E2"],
+  },
   dream: {
     chords: [
       ["F3", "A3", "C4", "E4"], // Fmaj7
@@ -55,10 +65,13 @@ const PROGRESSIONS = {
 
 // How the bed reacts to each power-up.
 const MODES = {
-  base: { bpm: 128, filter: 2200, prog: "base", drone: false },
-  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false },
-  shield: { bpm: 122, filter: 1500, prog: "base", drone: true },
-  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false },
+  // `vol` is the music bus level in dB. The closed-filter modes are lifted a
+  // little to compensate for the top end they lose.
+  base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -17 },
+  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -15 },
+  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -16 },
+  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -16 },
+  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -20 },
 };
 
 // Four notes on pickup, one shape per power-up.
@@ -92,7 +105,7 @@ export async function createAudio(rawContext) {
   sfxBus.connect(sfxFilter);
   sfxFilter.connect(reverb);
 
-  const musicBus = new Tone.Volume(-26);
+  const musicBus = new Tone.Volume(MODES.base.vol);
   const musicFilter = new Tone.Filter(MODES.base.filter, "lowpass");
   musicBus.connect(musicFilter);
   musicFilter.connect(reverb);
@@ -109,7 +122,7 @@ export async function createAudio(rawContext) {
     oscillator: { type: "sine" },
     envelope: { attack: 0.03, decay: 0.3, sustain: 0, release: 0.4 },
   }).connect(sfxBus);
-  soft.volume.value = -8;
+  soft.volume.value = -4;
 
   // for rising and falling sweeps
   const laser = new Tone.Synth({
@@ -122,10 +135,10 @@ export async function createAudio(rawContext) {
     noise: { type: "brown" },
     envelope: { attack: 0.005, decay: 0.16, sustain: 0 },
   });
-  const thudFilter = new Tone.Filter(420, "lowpass");
+  const thudFilter = new Tone.Filter(950, "lowpass");
   thud.connect(thudFilter);
   thudFilter.connect(sfxBus);
-  thud.volume.value = -26;
+  thud.volume.value = -16;
 
   /* -------------------------------------------------------------- music */
 
@@ -208,12 +221,14 @@ export async function createAudio(rawContext) {
   let disposed = false;
   let modeStack = [];
   let droneOn = false;
+  let menuTimer = null;
 
   const applyMode = () => {
     const key = modeStack.length ? modeStack[modeStack.length - 1] : "base";
     const cfg = MODES[key] || MODES.base;
     transport.bpm.rampTo(cfg.bpm, 1.1);
     musicFilter.frequency.rampTo(cfg.filter, 0.7);
+    musicBus.volume.rampTo(cfg.vol, 0.9);
     prog = PROGRESSIONS[cfg.prog];
 
     if (cfg.drone && !droneOn) {
@@ -282,21 +297,25 @@ export async function createAudio(rawContext) {
       soft.triggerAttackRelease("D4", "16n", at(), 0.3);
     },
 
-    // Deliberately small: a soft low pair, not a buzzer.
+    // A falling minor second. This used to sit on A2/G2, around 100 Hz, which
+    // phone speakers simply do not reproduce, so the sound was inaudible on
+    // the device it matters most on. Everything punitive now lives above
+    // ~300 Hz, where a small speaker can carry it.
     miss() {
       if (disposed) return;
       step = 0;
-      soft.triggerAttackRelease("A2", "16n", at(), 0.32);
-      soft.triggerAttackRelease("G2", "8n", at(0.09), 0.28);
+      soft.triggerAttackRelease("Eb4", "16n", at(), 0.5);
+      soft.triggerAttackRelease("D4", "8n", at(0.085), 0.45);
+      thud.triggerAttackRelease("16n", at(0.01), 0.3);
     },
 
     pepper() {
       if (disposed) return;
       step = 0;
-      thud.triggerAttackRelease("8n", at(), 0.5);
-      // a flat second underneath, which is what makes it read as a mistake
-      soft.triggerAttackRelease("F2", "8n", at(0.02), 0.32);
-      soft.triggerAttackRelease("Gb2", "8n", at(0.03), 0.24);
+      thud.triggerAttackRelease("8n", at(), 0.6);
+      // a flat second, which is what makes it read as a mistake
+      soft.triggerAttackRelease("F4", "8n", at(0.02), 0.5);
+      soft.triggerAttackRelease("Gb4", "8n", at(0.03), 0.42);
     },
 
     scorpion() {
@@ -304,8 +323,8 @@ export async function createAudio(rawContext) {
       step = 0;
       thud.triggerAttackRelease("4n", at(), 0.6);
       const t = at();
-      laser.triggerAttack("A3", t);
-      laser.frequency.exponentialRampTo("A1", 0.5, t);
+      laser.triggerAttack("A5", t);
+      laser.frequency.exponentialRampTo("A2", 0.5, t);
       laser.triggerRelease(t + 0.55);
     },
 
@@ -323,14 +342,27 @@ export async function createAudio(rawContext) {
       step = 0;
       modeStack = [];
       applyMode();
-      musicBus.volume.rampTo(-44, 1.4);
-      ["G4", "E4", "C4", "A3"].forEach((n, i) =>
-        soft.triggerAttackRelease(n, "8n", at(0.1 + i * 0.16), 0.34)
+      musicBus.volume.rampTo(-44, 0.6);
+      // then the slow minor menu bed fades back in under the score screen
+      menuTimer = setTimeout(() => {
+        if (!disposed) api.menuMusic();
+      }, 1700);
+      ["C5", "A4", "F4", "E4"].forEach((n, i) =>
+        soft.triggerAttackRelease(n, "8n", at(0.1 + i * 0.16), 0.5)
       );
+    },
+
+    // Slow, minor, quieter. Used on the pause and score screens.
+    menuMusic() {
+      if (disposed) return;
+      modeStack = ["menu"];
+      applyMode();
+      if (transport.state !== "started") transport.start("+0.1");
     },
 
     startMusic() {
       if (disposed) return;
+      clearTimeout(menuTimer);
       modeStack = [];
       applyMode();
       musicBus.volume.rampTo(-26, 1.2);
@@ -360,6 +392,7 @@ export async function createAudio(rawContext) {
 
     dispose() {
       disposed = true;
+      clearTimeout(menuTimer);
       try {
         transport.stop();
         transport.cancel();

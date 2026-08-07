@@ -1295,10 +1295,12 @@ export default function GamePage() {
         g.phase = "paused";
         setPhase("paused");
       }
+      if (!hidden && g.phase === "paused") audioRef.current?.menuMusic();
     };
     const onBlur = () => {
       audioRef.current?.setFocused(false);
       if (g.phase === "playing") {
+        audioRef.current?.menuMusic();
         g.dragging = false;
         g.phase = "paused";
         setPhase("paused");
@@ -1332,12 +1334,8 @@ export default function GamePage() {
   // Started from a real click so the AudioContext is created with a user
   // gesture in hand. Tone is imported behind the loading screen; if it fails
   // or takes too long, play begins silently rather than blocking the game.
-  const boot = useCallback(async () => {
-    if (audioRef.current) {
-      start();
-      return;
-    }
-    setBooting(true);
+  const initAudio = useCallback(async () => {
+    if (audioRef.current) return audioRef.current;
 
     let raw = null;
     try {
@@ -1355,25 +1353,51 @@ export default function GamePage() {
       ]);
       audioRef.current = audio;
       audio.setMuted(muted);
-      audio.startMusic();
+      return audio;
     } catch {
       audioRef.current = null; // silent fallback, the game still plays
+      return null;
     }
+  }, [muted]);
 
+  const boot = useCallback(async () => {
+    if (audioRef.current) {
+      start();
+      return;
+    }
+    setBooting(true);
+    const audio = await initAudio();
+    audio?.startMusic();
     setBooting(false);
     start();
-  }, [muted]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initAudio]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Opening the instructions is a real click, which is all a browser needs to
+  // allow audio. So the menu bed can start while the player reads, instead of
+  // the front screen sitting in silence until the first run.
+  const openHowTo = useCallback(() => {
+    setHowTo((v) => {
+      const next = !v;
+      if (next && !audioRef.current) {
+        initAudio().then((audio) => audio?.menuMusic());
+      }
+      return next;
+    });
+  }, [initAudio]);
 
   const toggleMute = useCallback(() => {
     setMuted((m) => {
       const next = !m;
       audioRef.current?.setMuted(next);
+      if (!next && !audioRef.current) {
+        initAudio().then((audio) => audio?.menuMusic());
+      }
       try {
         localStorage.setItem("chow-muted", next ? "1" : "0");
       } catch {}
       return next;
     });
-  }, []);
+  }, [initAudio]);
 
   const start = useCallback(() => {
     const g = gameRef.current;
@@ -1413,6 +1437,7 @@ export default function GamePage() {
     const g = gameRef.current;
     if (!g) return;
     audioRef.current?.setFocused(true);
+    audioRef.current?.startMusic();
     g.last = performance.now();
     g.phase = "playing";
     setPhase("playing");
@@ -1537,7 +1562,7 @@ export default function GamePage() {
             </button>
             <button
               className="btn btn--ghost"
-              onClick={() => setHowTo((v) => !v)}
+              onClick={openHowTo}
               aria-expanded={howTo}
             >
               {howTo ? "Hide how to play" : "How to play"}
