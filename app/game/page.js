@@ -31,6 +31,12 @@ const START_LIVES = 3;
 const MAX_LIVES = START_LIVES; // three hearts is full; extras are not banked
 
 const SCORPION_SCORE = 500; // scorpion peppers join the mix here
+
+// The pineapple slice is a bonus, not an effect: it runs on its own timer at
+// three times the gap of a normal power-up, so it stays a rare sighting, and
+// it drops five times faster than anything else on screen.
+const PINEAPPLE_POINTS = 150;
+const PINEAPPLE_SPEED = 5;
 const SKY_STEP = 50; // the sky shifts hue every this many points
 const SKY_END = 1500; // and lands on yellow here
 const SKY_FROM = 215; // blue
@@ -92,6 +98,7 @@ export default function GamePage() {
       score: 0,
       nextDrop: 0,
       nextPower: 0,
+      nextBonus: 0,
       powerOut: false,
       shake: 0,
       hudTick: 0,
@@ -291,6 +298,24 @@ export default function GamePage() {
       g.powerOut = true;
     };
 
+    const spawnBonus = () => {
+      const r = baseRadius() * 1.15;
+      g.fruits.push({
+        kind: "bonus",
+        x: place(r),
+        y: -r * 2.5,
+        prevBottom: -r * 1.5,
+        r,
+        points: PINEAPPLE_POINTS,
+        flesh: "#ffd400",
+        skin: "#e0951a",
+        spin: 2.6,
+        rot: Math.random() * Math.PI,
+        seed: Math.random() * 12,
+        vy: fallSpeed() * PINEAPPLE_SPEED,
+      });
+    };
+
     const burst = (x, y, color) => {
       for (let i = 0; i < 7; i++) {
         g.bits.push({
@@ -342,7 +367,7 @@ export default function GamePage() {
     const sweep = (endedKey) => {
       let cleared = 0;
       for (let i = g.fruits.length - 1; i >= 0; i--) {
-        if (g.fruits[i].kind === "power") continue;
+        if (g.fruits[i].kind === "power" || g.fruits[i].kind === "bonus") continue;
         const f = g.fruits[i];
         g.fruits.splice(i, 1);
         if (cleared < 8) puff(f.x, f.y);
@@ -436,6 +461,12 @@ export default function GamePage() {
         }
       }
 
+      g.nextBonus -= dt * 1000;
+      if (g.nextBonus <= 0 && g.caught >= 3) {
+        spawnBonus();
+        g.nextBonus = 36000 + Math.random() * 21000;
+      }
+
       const rimY = g.bowl.y;
       const half = g.bowl.w / 2;
       const mul = fallMultiplier();
@@ -449,6 +480,20 @@ export default function GamePage() {
         const bottom = f.y + f.r;
         const crossedRim = f.prevBottom <= rimY && bottom >= rimY;
         const overBowl = Math.abs(f.x - g.bowl.x) <= half;
+
+        // the pineapple leaves a bright trail, which is what sells the speed
+        if (f.kind === "bonus" && Math.random() < dt * 90) {
+          g.bits.push({
+            x: f.x + (Math.random() - 0.5) * f.r * 1.2,
+            y: f.y - f.r * 0.6,
+            vx: (Math.random() - 0.5) * 30,
+            vy: -60 - Math.random() * 60,
+            life: 0.35,
+            rise: true,
+            color: Math.random() < 0.5 ? "#ffffff" : "#ffe14d",
+            r: 1.2 + Math.random() * 2.2,
+          });
+        }
 
         // embers trail off a burning pepper
         if (f.kind === "pepper" && Math.random() < dt * (f.scorpion ? 26 : 14)) {
@@ -498,6 +543,15 @@ export default function GamePage() {
               g.fx[f.power] = spec.seconds; // refreshes rather than stacks
               pop(f.x, rimY - 14, spec.label, spec.color, 19);
             }
+          } else if (f.kind === "bonus") {
+            g.score += f.points;
+            setScore(g.score);
+            burst(f.x, rimY, "#ffd400");
+            burst(f.x, rimY, "#ffffff");
+            ring(f.x, rimY, "#ffe14d", 0);
+            ring(f.x, rimY, "#ffffff", 0.1);
+            ring(f.x, rimY, "#ffd400", 0.2);
+            pop(f.x, rimY - 16, `+${f.points}`, "#ffe14d", 26);
           } else if (f.kind === "pepper") {
             if (g.fx.mango > 0) {
               // Catch all is a fire of its own; peppers burn up harmlessly.
@@ -972,6 +1026,93 @@ export default function GamePage() {
       ctx.fill();
     };
 
+    const drawPineapple = (f) => {
+      const r = f.r;
+      const t = g.elapsed;
+      const pulse = 1 + Math.sin(t * 9 + f.seed) * 0.09;
+
+      // layered glow so it reads as lit from within on any sky hue
+      ctx.fillStyle = "rgba(255,220,60,0.18)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.9 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,240,150,0.26)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.4 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.24 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // scalloped rind, twelve lobes like a cut slice
+      const lobes = 12;
+      ctx.fillStyle = f.skin;
+      ctx.beginPath();
+      for (let i = 0; i <= lobes * 2; i++) {
+        const ang = (i / (lobes * 2)) * Math.PI * 2;
+        const rad = r * (i % 2 === 0 ? 1.0 : 0.86);
+        const px = Math.cos(ang) * rad;
+        const py = Math.sin(ang) * rad;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      // dark rind edge, the one thing that keeps it visible once the sky
+      // itself has turned yellow
+      ctx.strokeStyle = "rgba(120,58,0,0.75)";
+      ctx.lineWidth = Math.max(2, r * 0.1);
+      ctx.lineJoin = "round";
+      ctx.stroke();
+
+      // flesh
+      ctx.fillStyle = f.flesh;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff0a8";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.7, 0, Math.PI * 2);
+      ctx.fill();
+
+      // radial segments
+      ctx.strokeStyle = "rgba(214,146,20,0.55)";
+      ctx.lineWidth = Math.max(1.4, r * 0.07);
+      for (let i = 0; i < 8; i++) {
+        const ang = (i / 8) * Math.PI * 2 + t * 0.6;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(ang) * r * 0.26, Math.sin(ang) * r * 0.26);
+        ctx.lineTo(Math.cos(ang) * r * 0.68, Math.sin(ang) * r * 0.68);
+        ctx.stroke();
+      }
+
+      // core
+      ctx.fillStyle = "#ffd400";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.24, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.13, 0, Math.PI * 2);
+      ctx.fill();
+
+      // four-point sparkle riding on top
+      const sp = 0.6 + Math.abs(Math.sin(t * 7 + f.seed)) * 0.6;
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 1.05 * sp);
+      ctx.quadraticCurveTo(r * 0.08, -r * 0.12, r * 0.62 * sp, 0);
+      ctx.quadraticCurveTo(r * 0.08, r * 0.12, 0, r * 1.05 * sp);
+      ctx.quadraticCurveTo(-r * 0.08, r * 0.12, -r * 0.62 * sp, 0);
+      ctx.quadraticCurveTo(-r * 0.08, -r * 0.12, 0, -r * 1.05 * sp);
+      ctx.closePath();
+      ctx.globalAlpha = 0.55;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    };
+
     const drawItem = (f) => {
       ctx.save();
       ctx.translate(f.x, f.y);
@@ -982,7 +1123,9 @@ export default function GamePage() {
       if (f.kind === "fruit") {
         ctx.rotate(f.shape === "round" ? f.rot : Math.sin(f.rot) * 0.32);
       }
+      if (f.kind === "bonus") ctx.rotate(f.rot);
       if (f.kind === "power") drawPower(f);
+      else if (f.kind === "bonus") drawPineapple(f);
       else if (f.kind === "pepper") drawPepper(f);
       else drawFruit(f);
       ctx.restore();
@@ -1154,6 +1297,7 @@ export default function GamePage() {
     g.lives = START_LIVES;
     g.nextDrop = 500;
     g.nextPower = 10000;
+    g.nextBonus = 30000;
     g.powerOut = false;
     g.shake = 0;
     g.hudSig = "";
@@ -1331,6 +1475,14 @@ export default function GamePage() {
               <li>
                 <b style={{ color: "#ff2424" }}>Scorpion pepper</b> — from 500, and
                 catching one ends the run on the spot.
+              </li>
+            </ul>
+
+            <ul className="rules rules--stack">
+              <li>
+                <b style={{ color: "#e0a800" }}>Pineapple slice</b> — rare, drops
+                five times faster than anything else, and pays 150 if you can
+                get under it.
               </li>
             </ul>
 
