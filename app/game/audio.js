@@ -65,13 +65,13 @@ const PROGRESSIONS = {
 
 // How the bed reacts to each power-up.
 const MODES = {
-  // `vol` is the music bus level in dB. The closed-filter modes are lifted a
-  // little to compensate for the top end they lose.
+  // One level for every bed, so the music never changes loudness between the
+  // menus, normal play and any power-up. Only tempo, filter and harmony move.
   base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -10 },
-  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -8 },
-  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -9 },
-  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -9 },
-  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -12 },
+  mango: { bpm: 142, filter: 3200, prog: "bright", drone: false, vol: -10 },
+  shield: { bpm: 122, filter: 2000, prog: "base", drone: true, vol: -10 },
+  bowl: { bpm: 100, filter: 2400, prog: "dream", drone: false, vol: -10 },
+  menu: { bpm: 74, filter: 2000, prog: "minor", drone: false, vol: -10 },
 };
 
 // Four notes on pickup, one shape per power-up.
@@ -94,27 +94,21 @@ export async function createAudio(rawContext) {
   transport.bpm.value = MODES.base.bpm;
 
   /*
-    No dynamics processing in the audible path.
+    Nothing in this chain compresses or limits. Tone's Limiter is a Compressor
+    at ratio 20 with a 10 ms release, and any compressor sitting across a bus
+    shared by music and effects will duck one with the other. Both are gone.
 
-    Tone's Limiter is a Compressor at ratio 20 with a 10 ms release. Whenever it
-    engages, its gain envelope moves at roughly 100 Hz, and that modulation is
-    itself audible as a buzz on every note transient. A threshold of -6 dB was
-    low enough for ordinary notes to trigger it, and a second compressor in
-    front of it made every catch duck the music as well.
-
-    The whole chain now runs around -25 dBFS peak, so the fix is simply to give
-    it room: the limiter stays as a last-ditch safety at -1 dB, where nothing at
-    these levels can reach it, and it should never engage at all.
+    The chain peaks around -25 dBFS, roughly 25 dB of headroom below clipping,
+    so there is nothing for a limiter to protect against in the first place.
   */
-  const limiter = new Tone.Limiter(-1).toDestination();
-  const master = new Tone.Volume(-3).connect(limiter);
+  const master = new Tone.Volume(-3).toDestination();
 
   const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.26 }).connect(master);
   await reverb.ready;
 
   // buses
   const sfxBus = new Tone.Volume(-9);
-  const sfxFilter = new Tone.Filter(2800, "lowpass");
+  const sfxFilter = new Tone.Filter(3400, "lowpass");
   sfxBus.connect(sfxFilter);
   sfxFilter.connect(reverb);
 
@@ -127,22 +121,20 @@ export async function createAudio(rawContext) {
 
   const pluck = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: "triangle" },
-    // 12 ms attack rather than 5: slow enough that the note start is a ramp
-    // instead of a step, which removes the click at the front of each catch.
-    envelope: { attack: 0.012, decay: 0.3, sustain: 0, release: 0.35 },
+    envelope: { attack: 0.005, decay: 0.28, sustain: 0, release: 0.35 },
   }).connect(sfxBus);
-  // capped here rather than in the constructor: with the (voice, options)
-  // form those options go to the voice, so maxPolyphony there does nothing
-  pluck.maxPolyphony = 6;
+  // Generous on purpose. A low cap makes Tone steal a voice from a note that
+  // is still sounding, and that abrupt cut is itself a click.
+  pluck.maxPolyphony = 16;
   pluck.volume.value = -6;
 
   const soft = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: "sine" },
     envelope: { attack: 0.03, decay: 0.3, sustain: 0, release: 0.4 },
   }).connect(sfxBus);
-  // capped here rather than in the constructor: with the (voice, options)
-  // form those options go to the voice, so maxPolyphony there does nothing
-  soft.maxPolyphony = 5;
+  // Generous on purpose. A low cap makes Tone steal a voice from a note that
+  // is still sounding, and that abrupt cut is itself a click.
+  soft.maxPolyphony = 16;
   soft.volume.value = -4;
 
   // for rising and falling sweeps
@@ -167,9 +159,9 @@ export async function createAudio(rawContext) {
     oscillator: { type: "triangle" },
     envelope: { attack: 0.012, decay: 0.9, sustain: 0.04, release: 0.7 },
   }).connect(musicBus);
-  // capped here rather than in the constructor: with the (voice, options)
-  // form those options go to the voice, so maxPolyphony there does nothing
-  comp.maxPolyphony = 6;
+  // Generous on purpose. A low cap makes Tone steal a voice from a note that
+  // is still sounding, and that abrupt cut is itself a click.
+  comp.maxPolyphony = 12;
   comp.volume.value = -9;
 
   const bass = new Tone.Synth({
@@ -191,9 +183,9 @@ export async function createAudio(rawContext) {
     oscillator: { type: "sine" },
     envelope: { attack: 1.6, decay: 0.4, sustain: 0.6, release: 2.6 },
   }).connect(musicBus);
-  // capped here rather than in the constructor: with the (voice, options)
-  // form those options go to the voice, so maxPolyphony there does nothing
-  drone.maxPolyphony = 3;
+  // Generous on purpose. A low cap makes Tone steal a voice from a note that
+  // is still sounding, and that abrupt cut is itself a click.
+  drone.maxPolyphony = 12;
   drone.volume.value = -20;
 
   let prog = PROGRESSIONS.base;
@@ -237,15 +229,20 @@ export async function createAudio(rawContext) {
 
   // Tone throws if two notes land on the exact same instant, which is easy to
   // hit when two fruit are caught on one frame. This keeps times increasing.
+  // Everything is scheduled a little ahead of the clock. Firing a note at
+  // exactly Tone.now() lands it on the very edge of the current render quantum,
+  // where the gain change can be applied part-way through a buffer instead of
+  // at a zero crossing. That discontinuity is the click. 25 ms of lead is
+  // imperceptible as latency but puts every event safely in the future.
+  const LEAD = 0.025;
   let lastAt = 0;
   const at = (offset) => {
-    const now = Tone.now() + (offset || 0);
-    lastAt = Math.max(now, lastAt + 0.015);
+    const now = Tone.now() + LEAD + (offset || 0);
+    lastAt = Math.max(now, lastAt + 0.012);
     return lastAt;
   };
 
   let step = 0;
-  let lastCatchAt = 0;
   let disposed = false;
   let modeStack = [];
   let droneOn = false;
@@ -271,17 +268,9 @@ export async function createAudio(rawContext) {
   const api = {
     catchFruit() {
       if (disposed) return;
-      // Fruit bowl doubles the drop rate, so catches can land three or four to
-      // a frame. Stacking that many voices is what made it sound gritty, so
-      // notes closer than 55 ms are skipped: the phrase still advances, the
-      // previous note is still ringing, and the mix stays clean.
-      const now = Tone.now();
-      const crowded = now - lastCatchAt < 0.055;
-      step = step + 1 >= SCALE.length ? WRAP_TO : step + 1;
-      if (crowded) return;
-      lastCatchAt = now;
       const note = SCALE[Math.min(step, SCALE.length - 1)];
-      pluck.triggerAttackRelease(note, "16n", at(), 0.45);
+      pluck.triggerAttackRelease(note, "16n", at(), 0.5);
+      step = step + 1 >= SCALE.length ? WRAP_TO : step + 1;
     },
 
     resetPhrase() {
@@ -388,11 +377,11 @@ export async function createAudio(rawContext) {
       step = 0;
       modeStack = [];
       applyMode();
-      musicBus.volume.rampTo(-44, 0.6);
+      musicBus.volume.rampTo(-30, 0.5);
       // then the slow minor menu bed fades back in under the score screen
       menuTimer = setTimeout(() => {
         if (!disposed) api.menuMusic();
-      }, 1700);
+      }, 1200);
       ["C5", "A4", "F4", "E4"].forEach((n, i) =>
         soft.triggerAttackRelease(n, "8n", at(0.1 + i * 0.16), 0.5)
       );
@@ -443,8 +432,8 @@ export async function createAudio(rawContext) {
         transport.cancel();
         seq.dispose();
         [pluck, soft, laser, thud, thudFilter, comp, bass, rim, rimFilter,
-         drone, musicBus, musicFilter, sfxBus, sfxFilter, reverb, master,
-         limiter].forEach((n) => n.dispose());
+         drone, musicBus, musicFilter, sfxBus, sfxFilter, reverb,
+         master].forEach((n) => n.dispose());
       } catch {}
     },
   };

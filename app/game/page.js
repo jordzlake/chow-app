@@ -50,6 +50,8 @@ export default function GamePage() {
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
   const audioRef = useRef(null);
+  const audioPromiseRef = useRef(null); // dedupes concurrent boots
+  const mutedRef = useRef(false);
 
   const [phase, setPhase] = useState("ready"); // ready | playing | paused | over
   const [score, setScore] = useState(0);
@@ -72,7 +74,9 @@ export default function GamePage() {
     try {
       setName(localStorage.getItem("chow-name") || "");
       setBest(Number(localStorage.getItem("chow-best") || 0));
-      setMuted(localStorage.getItem("chow-muted") === "1");
+      const m = localStorage.getItem("chow-muted") === "1";
+      mutedRef.current = m;
+      setMuted(m);
     } catch {}
   }, []);
 
@@ -1342,9 +1346,14 @@ export default function GamePage() {
   // Started from a real click so the AudioContext is created with a user
   // gesture in hand. Tone is imported behind the loading screen; if it fails
   // or takes too long, play begins silently rather than blocking the game.
-  const initAudio = useCallback(async () => {
-    if (audioRef.current) return audioRef.current;
+  const initAudio = useCallback(() => {
+    if (audioRef.current) return Promise.resolve(audioRef.current);
+    if (audioPromiseRef.current) return audioPromiseRef.current;
+    audioPromiseRef.current = buildAudio();
+    return audioPromiseRef.current;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const buildAudio = useCallback(async () => {
     let raw = null;
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -1360,13 +1369,13 @@ export default function GamePage() {
         new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 8000)),
       ]);
       audioRef.current = audio;
-      audio.setMuted(muted);
+      audio.setMuted(mutedRef.current);
       return audio;
     } catch {
       audioRef.current = null; // silent fallback, the game still plays
       return null;
     }
-  }, [muted]);
+  }, []);
 
   const boot = useCallback(async () => {
     if (audioRef.current) {
@@ -1383,19 +1392,34 @@ export default function GamePage() {
   // Opening the instructions is a real click, which is all a browser needs to
   // allow audio. So the menu bed can start while the player reads, instead of
   // the front screen sitting in silence until the first run.
-  const openHowTo = useCallback(() => {
-    setHowTo((v) => {
-      const next = !v;
-      if (next && !audioRef.current) {
-        initAudio().then((audio) => audio?.menuMusic());
-      }
-      return next;
-    });
+  // A browser will not let any sound play before the player has interacted, so
+  // the opening menu is silent until they touch the screen. This listens once
+  // for that first touch and brings the menu bed in then.
+  useEffect(() => {
+    let done = false;
+    const warm = () => {
+      if (done) return;
+      done = true;
+      initAudio().then((audio) => {
+        if (audio && gameRef.current?.phase !== "playing") audio.menuMusic();
+      });
+    };
+    window.addEventListener("pointerdown", warm, { once: true });
+    window.addEventListener("keydown", warm, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", warm);
+      window.removeEventListener("keydown", warm);
+    };
   }, [initAudio]);
+
+  const openHowTo = useCallback(() => {
+    setHowTo((v) => !v);
+  }, []);
 
   const toggleMute = useCallback(() => {
     setMuted((m) => {
       const next = !m;
+      mutedRef.current = next;
       audioRef.current?.setMuted(next);
       if (!next && !audioRef.current) {
         initAudio().then((audio) => audio?.menuMusic());
