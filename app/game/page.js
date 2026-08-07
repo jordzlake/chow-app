@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import logo from "@/public/logo.png";
-import { createAudio } from "./audio";
+import { createAudio, preloadAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
    the pool, so the drop mix widens as the run goes rather than all at once.
@@ -1786,7 +1786,10 @@ export default function GamePage() {
 
   const buildAudio = useCallback(async (rawContext) => {
     try {
-      const audio = await createAudio(rawContext);
+      const audio = await Promise.race([
+        createAudio(rawContext),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 10000)),
+      ]);
       if (!audio) return null;
       audioRef.current = audio;
       audio.setMuted(mutedRef.current);
@@ -1819,10 +1822,28 @@ export default function GamePage() {
   // The context itself is built on the first real interaction, because that is
   // what a browser requires before it will let anything through. By then the
   // module is already in memory, so there is no wait.
-  // There is no module to download now, so the first touch is all it takes:
-  // the context is built synchronously in the handler and the menu bed starts
-  // immediately.
+  /*
+    Two separate things, deliberately kept apart.
+
+    The Tone module is fetched at the first idle moment. That is only a
+    download: no AudioContext is created and nothing plays, so it cannot delay
+    the first paint.
+
+    The context is built on the first real interaction, inside the handler and
+    before any await, because that is what carries the user gesture.
+
+    This runs on the game route itself, so it works whether the player came
+    from the poster or opened /game directly.
+  */
   useEffect(() => {
+    let idle = null;
+    const kick = () => preloadAudio().catch(() => {});
+    if (typeof window.requestIdleCallback === "function") {
+      idle = window.requestIdleCallback(kick, { timeout: 2000 });
+    } else {
+      idle = window.setTimeout(kick, 800);
+    }
+
     let started = false;
     const onFirstTouch = () => {
       if (started) return;
@@ -1834,10 +1855,17 @@ export default function GamePage() {
     const nudge = () => audioRef.current?.resume();
 
     window.addEventListener("pointerdown", onFirstTouch);
+    window.addEventListener("touchstart", onFirstTouch);
     window.addEventListener("keydown", onFirstTouch);
     window.addEventListener("pointerdown", nudge);
     return () => {
+      if (typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idle);
+      } else {
+        window.clearTimeout(idle);
+      }
       window.removeEventListener("pointerdown", onFirstTouch);
+      window.removeEventListener("touchstart", onFirstTouch);
       window.removeEventListener("keydown", onFirstTouch);
       window.removeEventListener("pointerdown", nudge);
     };
