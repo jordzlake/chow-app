@@ -67,11 +67,11 @@ const PROGRESSIONS = {
 const MODES = {
   // `vol` is the music bus level in dB. The closed-filter modes are lifted a
   // little to compensate for the top end they lose.
-  base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -17 },
-  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -15 },
-  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -16 },
-  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -16 },
-  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -20 },
+  base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -12 },
+  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -10 },
+  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -11 },
+  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -11 },
+  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -15 },
 };
 
 // Four notes on pickup, one shape per power-up.
