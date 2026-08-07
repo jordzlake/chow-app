@@ -93,23 +93,28 @@ export async function createAudio(rawContext) {
   const transport = Tone.getTransport();
   transport.bpm.value = MODES.base.bpm;
 
-  const limiter = new Tone.Limiter(-6).toDestination();
-  // A gentle compressor ahead of the limiter. Without it, a burst of catches
-  // during Fruit bowl slams the limiter and that clamping is what crunches.
-  const glue = new Tone.Compressor({
-    threshold: -20,
-    ratio: 3,
-    attack: 0.006,
-    release: 0.18,
-  }).connect(limiter);
-  const master = new Tone.Volume(-3).connect(glue);
+  /*
+    No dynamics processing in the audible path.
+
+    Tone's Limiter is a Compressor at ratio 20 with a 10 ms release. Whenever it
+    engages, its gain envelope moves at roughly 100 Hz, and that modulation is
+    itself audible as a buzz on every note transient. A threshold of -6 dB was
+    low enough for ordinary notes to trigger it, and a second compressor in
+    front of it made every catch duck the music as well.
+
+    The whole chain now runs around -25 dBFS peak, so the fix is simply to give
+    it room: the limiter stays as a last-ditch safety at -1 dB, where nothing at
+    these levels can reach it, and it should never engage at all.
+  */
+  const limiter = new Tone.Limiter(-1).toDestination();
+  const master = new Tone.Volume(-3).connect(limiter);
 
   const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.26 }).connect(master);
   await reverb.ready;
 
   // buses
   const sfxBus = new Tone.Volume(-9);
-  const sfxFilter = new Tone.Filter(3400, "lowpass");
+  const sfxFilter = new Tone.Filter(2800, "lowpass");
   sfxBus.connect(sfxFilter);
   sfxFilter.connect(reverb);
 
@@ -121,17 +126,23 @@ export async function createAudio(rawContext) {
   /* ---------------------------------------------------------------- sfx */
 
   const pluck = new Tone.PolySynth(Tone.Synth, {
-    maxPolyphony: 6,
     oscillator: { type: "triangle" },
-    envelope: { attack: 0.005, decay: 0.28, sustain: 0, release: 0.35 },
+    // 12 ms attack rather than 5: slow enough that the note start is a ramp
+    // instead of a step, which removes the click at the front of each catch.
+    envelope: { attack: 0.012, decay: 0.3, sustain: 0, release: 0.35 },
   }).connect(sfxBus);
+  // capped here rather than in the constructor: with the (voice, options)
+  // form those options go to the voice, so maxPolyphony there does nothing
+  pluck.maxPolyphony = 6;
   pluck.volume.value = -6;
 
   const soft = new Tone.PolySynth(Tone.Synth, {
-    maxPolyphony: 5,
     oscillator: { type: "sine" },
     envelope: { attack: 0.03, decay: 0.3, sustain: 0, release: 0.4 },
   }).connect(sfxBus);
+  // capped here rather than in the constructor: with the (voice, options)
+  // form those options go to the voice, so maxPolyphony there does nothing
+  soft.maxPolyphony = 5;
   soft.volume.value = -4;
 
   // for rising and falling sweeps
@@ -153,10 +164,12 @@ export async function createAudio(rawContext) {
   /* -------------------------------------------------------------- music */
 
   const comp = new Tone.PolySynth(Tone.Synth, {
-    maxPolyphony: 6,
     oscillator: { type: "triangle" },
     envelope: { attack: 0.012, decay: 0.9, sustain: 0.04, release: 0.7 },
   }).connect(musicBus);
+  // capped here rather than in the constructor: with the (voice, options)
+  // form those options go to the voice, so maxPolyphony there does nothing
+  comp.maxPolyphony = 6;
   comp.volume.value = -9;
 
   const bass = new Tone.Synth({
@@ -175,10 +188,12 @@ export async function createAudio(rawContext) {
   rim.volume.value = -30;
 
   const drone = new Tone.PolySynth(Tone.Synth, {
-    maxPolyphony: 3,
     oscillator: { type: "sine" },
     envelope: { attack: 1.6, decay: 0.4, sustain: 0.6, release: 2.6 },
   }).connect(musicBus);
+  // capped here rather than in the constructor: with the (voice, options)
+  // form those options go to the voice, so maxPolyphony there does nothing
+  drone.maxPolyphony = 3;
   drone.volume.value = -20;
 
   let prog = PROGRESSIONS.base;
@@ -429,7 +444,7 @@ export async function createAudio(rawContext) {
         seq.dispose();
         [pluck, soft, laser, thud, thudFilter, comp, bass, rim, rimFilter,
          drone, musicBus, musicFilter, sfxBus, sfxFilter, reverb, master,
-         glue, limiter].forEach((n) => n.dispose());
+         limiter].forEach((n) => n.dispose());
       } catch {}
     },
   };

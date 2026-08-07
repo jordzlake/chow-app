@@ -110,6 +110,7 @@ export default function GamePage() {
       powerOut: false,
       shake: 0,
       hudTick: 0,
+      scoreDirty: false,
       hudSig: "",
       raf: 0,
       last: 0,
@@ -552,7 +553,7 @@ export default function GamePage() {
                 // already at full health: no extra heart is banked, so the
                 // drop pays out in points instead of being wasted
                 g.score += 100;
-                setScore(g.score);
+                g.scoreDirty = true;
                 audioRef.current?.fullHealth();
                 pop(f.x, rimY - 14, "Full health +100", spec.color, 18);
               }
@@ -563,7 +564,7 @@ export default function GamePage() {
             }
           } else if (f.kind === "bonus") {
             g.score += f.points;
-            setScore(g.score);
+            g.scoreDirty = true;
             audioRef.current?.bonus();
             burst(f.x, rimY, "#ffd400");
             burst(f.x, rimY, "#ffffff");
@@ -599,7 +600,7 @@ export default function GamePage() {
             audioRef.current?.catchFruit();
             burst(f.x, rimY, f.flesh);
             pop(f.x, rimY - 10, `+${f.points}`, "#ffffff", f.points >= 30 ? 22 : 17);
-            setScore(g.score);
+            g.scoreDirty = true;
           }
           continue;
         }
@@ -657,6 +658,10 @@ export default function GamePage() {
       g.hudTick += dt;
       if (g.hudTick >= 0.1) {
         g.hudTick = 0;
+        if (g.scoreDirty) {
+          g.scoreDirty = false;
+          setScore(g.score);
+        }
         const live = TIMED_KEYS.filter((k) => g.fx[k] > 0).map((k) => ({
           key: k,
           label: POWERS[k].label,
@@ -673,6 +678,8 @@ export default function GamePage() {
     };
 
     const end = () => {
+      g.scoreDirty = false;
+      setScore(g.score); // flush before the score screen renders
       audioRef.current?.gameOver();
       g.phase = "over";
       g.dragging = false;
