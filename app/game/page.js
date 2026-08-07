@@ -1447,14 +1447,16 @@ export default function GamePage() {
         </div>
       )}
 
-      <button
-        className="mute"
-        onClick={toggleMute}
-        aria-label={muted ? "Unmute" : "Mute"}
-        aria-pressed={muted}
-      >
-        {muted ? "\u2715 Sound" : "\u266a Sound"}
-      </button>
+      {phase === "playing" && (
+        <button
+          className="mute"
+          onClick={toggleMute}
+          aria-label={muted ? "Unmute" : "Mute"}
+          aria-pressed={muted}
+        >
+          {muted ? "\u2715 Sound" : "\u266a Sound"}
+        </button>
+      )}
 
       <div className="hud">
         <div className="hud__chip">
@@ -1611,6 +1613,10 @@ export default function GamePage() {
               </div>
             )}
 
+            <button className="btn btn--ghost" onClick={toggleMute}>
+              {muted ? "\u2715 Sound off" : "\u266a Sound on"}
+            </button>
+
             {best > 0 && <p className="panel__text">Your best so far: {best}</p>}
             <Link href="/" className="btn btn--ghost">
               Back to poster
@@ -1626,6 +1632,9 @@ export default function GamePage() {
             <p className="panel__text">You left the game. Pick up where you stopped.</p>
             <button className="btn" onClick={resume}>
               Keep going
+            </button>
+            <button className="btn btn--ghost" onClick={toggleMute}>
+              {muted ? "\u2715 Sound off" : "\u266a Sound on"}
             </button>
           </div>
         </div>
@@ -1659,6 +1668,9 @@ export default function GamePage() {
                 </button>
                 <button className="btn btn--ghost" onClick={() => setBoardOpen(false)}>
                   Back
+                </button>
+                <button className="btn btn--ghost" onClick={toggleMute}>
+                  {muted ? "\u2715 Sound off" : "\u266a Sound on"}
                 </button>
               </>
             ) : (
@@ -1704,6 +1716,9 @@ export default function GamePage() {
                 </button>
                 <button className="btn btn--ghost" onClick={openBoard}>
                   See the top 10
+                </button>
+                <button className="btn btn--ghost" onClick={toggleMute}>
+                  {muted ? "\u2715 Sound off" : "\u266a Sound on"}
                 </button>
               </>
             )}
