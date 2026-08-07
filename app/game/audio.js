@@ -67,11 +67,11 @@ const PROGRESSIONS = {
 const MODES = {
   // `vol` is the music bus level in dB. The closed-filter modes are lifted a
   // little to compensate for the top end they lose.
-  base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -12 },
-  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -10 },
-  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -11 },
-  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -11 },
-  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -15 },
+  base: { bpm: 128, filter: 2200, prog: "base", drone: false, vol: -10 },
+  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false, vol: -8 },
+  shield: { bpm: 122, filter: 1600, prog: "base", drone: true, vol: -9 },
+  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false, vol: -9 },
+  menu: { bpm: 74, filter: 1800, prog: "minor", drone: false, vol: -12 },
 };
 
 // Four notes on pickup, one shape per power-up.
@@ -94,7 +94,15 @@ export async function createAudio(rawContext) {
   transport.bpm.value = MODES.base.bpm;
 
   const limiter = new Tone.Limiter(-6).toDestination();
-  const master = new Tone.Volume(-3).connect(limiter);
+  // A gentle compressor ahead of the limiter. Without it, a burst of catches
+  // during Fruit bowl slams the limiter and that clamping is what crunches.
+  const glue = new Tone.Compressor({
+    threshold: -20,
+    ratio: 3,
+    attack: 0.006,
+    release: 0.18,
+  }).connect(limiter);
+  const master = new Tone.Volume(-3).connect(glue);
 
   const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.26 }).connect(master);
   await reverb.ready;
@@ -113,12 +121,14 @@ export async function createAudio(rawContext) {
   /* ---------------------------------------------------------------- sfx */
 
   const pluck = new Tone.PolySynth(Tone.Synth, {
+    maxPolyphony: 6,
     oscillator: { type: "triangle" },
     envelope: { attack: 0.005, decay: 0.28, sustain: 0, release: 0.35 },
   }).connect(sfxBus);
   pluck.volume.value = -6;
 
   const soft = new Tone.PolySynth(Tone.Synth, {
+    maxPolyphony: 5,
     oscillator: { type: "sine" },
     envelope: { attack: 0.03, decay: 0.3, sustain: 0, release: 0.4 },
   }).connect(sfxBus);
@@ -143,6 +153,7 @@ export async function createAudio(rawContext) {
   /* -------------------------------------------------------------- music */
 
   const comp = new Tone.PolySynth(Tone.Synth, {
+    maxPolyphony: 6,
     oscillator: { type: "triangle" },
     envelope: { attack: 0.012, decay: 0.9, sustain: 0.04, release: 0.7 },
   }).connect(musicBus);
@@ -164,6 +175,7 @@ export async function createAudio(rawContext) {
   rim.volume.value = -30;
 
   const drone = new Tone.PolySynth(Tone.Synth, {
+    maxPolyphony: 3,
     oscillator: { type: "sine" },
     envelope: { attack: 1.6, decay: 0.4, sustain: 0.6, release: 2.6 },
   }).connect(musicBus);
@@ -218,6 +230,7 @@ export async function createAudio(rawContext) {
   };
 
   let step = 0;
+  let lastCatchAt = 0;
   let disposed = false;
   let modeStack = [];
   let droneOn = false;
@@ -243,9 +256,17 @@ export async function createAudio(rawContext) {
   const api = {
     catchFruit() {
       if (disposed) return;
-      const note = SCALE[Math.min(step, SCALE.length - 1)];
-      pluck.triggerAttackRelease(note, "16n", at(), 0.5);
+      // Fruit bowl doubles the drop rate, so catches can land three or four to
+      // a frame. Stacking that many voices is what made it sound gritty, so
+      // notes closer than 55 ms are skipped: the phrase still advances, the
+      // previous note is still ringing, and the mix stays clean.
+      const now = Tone.now();
+      const crowded = now - lastCatchAt < 0.055;
       step = step + 1 >= SCALE.length ? WRAP_TO : step + 1;
+      if (crowded) return;
+      lastCatchAt = now;
+      const note = SCALE[Math.min(step, SCALE.length - 1)];
+      pluck.triggerAttackRelease(note, "16n", at(), 0.45);
     },
 
     resetPhrase() {
@@ -290,6 +311,16 @@ export async function createAudio(rawContext) {
       ["G5", "A5", "C6", "E6"].forEach((n, i) =>
         pluck.triggerAttackRelease(n, "32n", at(i * 0.05), 0.4)
       );
+    },
+
+    // Health pickup with nothing to heal: a bright pair so the 100 points
+    // still land as a reward rather than silence.
+    fullHealth() {
+      if (disposed) return;
+      ["D5", "A5"].forEach((n, i) =>
+        pluck.triggerAttackRelease(n, "16n", at(i * 0.08), 0.45)
+      );
+      soft.triggerAttackRelease("F#5", "8n", at(0.16), 0.35);
     },
 
     block() {
@@ -364,8 +395,7 @@ export async function createAudio(rawContext) {
       if (disposed) return;
       clearTimeout(menuTimer);
       modeStack = [];
-      applyMode();
-      musicBus.volume.rampTo(-26, 1.2);
+      applyMode(); // applyMode owns the level; do not set it again here
       if (transport.state !== "started") transport.start("+0.1");
     },
 
@@ -399,7 +429,7 @@ export async function createAudio(rawContext) {
         seq.dispose();
         [pluck, soft, laser, thud, thudFilter, comp, bass, rim, rimFilter,
          drone, musicBus, musicFilter, sfxBus, sfxFilter, reverb, master,
-         limiter].forEach((n) => n.dispose());
+         glue, limiter].forEach((n) => n.dispose());
       } catch {}
     },
   };

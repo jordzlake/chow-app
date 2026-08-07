@@ -553,6 +553,7 @@ export default function GamePage() {
                 // drop pays out in points instead of being wasted
                 g.score += 100;
                 setScore(g.score);
+                audioRef.current?.fullHealth();
                 pop(f.x, rimY - 14, "Full health +100", spec.color, 18);
               }
             } else {
