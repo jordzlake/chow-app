@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import logo from "@/public/logo.png";
-import { createAudio, preloadAudio } from "./audio";
+import { createAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
    the pool, so the drop mix widens as the run goes rather than all at once.
@@ -80,7 +80,6 @@ export default function GamePage() {
   const [board, setBoard] = useState(null);
   const [boardOpen, setBoardOpen] = useState(false);
   const [howTo, setHowTo] = useState(false);
-  const [booting, setBooting] = useState(false); // audio is loading
   const [muted, setMuted] = useState(false);
 
   useEffect(() => {
@@ -1800,17 +1799,24 @@ export default function GamePage() {
     }
   }, []);
 
-  const boot = useCallback(async () => {
+  /*
+    Start the run immediately and bring the audio up alongside it. Nothing here
+    is awaited before the game begins: if the engine is slow, or fails, or the
+    browser refuses the context, play is unaffected and the sound simply joins
+    late or not at all. The old loading screen sat in front of an awaited
+    promise, so anything that failed to settle left the overlay up forever.
+  */
+  const boot = useCallback(() => {
+    start();
     if (audioRef.current) {
-      start();
+      audioRef.current.resume();
+      audioRef.current.startMusic();
       return;
     }
-    setBooting(true);
-    const audio = await initAudio();
-    audio?.resume();
-    audio?.startMusic();
-    setBooting(false);
-    start();
+    initAudio().then((audio) => {
+      audio?.resume();
+      audio?.startMusic();
+    });
   }, [initAudio]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Opening the instructions is a real click, which is all a browser needs to
@@ -1823,27 +1829,20 @@ export default function GamePage() {
   // what a browser requires before it will let anything through. By then the
   // module is already in memory, so there is no wait.
   /*
-    Two separate things, deliberately kept apart.
+    Tone is imported inside the first gesture, never before it.
 
-    The Tone module is fetched at the first idle moment. That is only a
-    download: no AudioContext is created and nothing plays, so it cannot delay
-    the first paint.
+    Importing it earlier was the bug behind silence on a cold /game load.
+    Tone builds its own AudioContext the moment the module evaluates, and a
+    context created with no user activation on the document is born suspended.
+    Arriving from the poster, the click on the play link had already granted
+    activation, so that context came up running and everything worked; opening
+    /game directly there was no activation, the module-level context was stuck,
+    and handing Tone a fresh one afterwards did not rescue it.
 
-    The context is built on the first real interaction, inside the handler and
-    before any await, because that is what carries the user gesture.
-
-    This runs on the game route itself, so it works whether the player came
-    from the poster or opened /game directly.
+    Now the raw context is built and resumed synchronously in the handler, and
+    only then is the module fetched, so there is nothing to be stuck.
   */
   useEffect(() => {
-    let idle = null;
-    const kick = () => preloadAudio().catch(() => {});
-    if (typeof window.requestIdleCallback === "function") {
-      idle = window.requestIdleCallback(kick, { timeout: 2000 });
-    } else {
-      idle = window.setTimeout(kick, 800);
-    }
-
     let started = false;
     const onFirstTouch = () => {
       if (started) return;
@@ -1859,11 +1858,6 @@ export default function GamePage() {
     window.addEventListener("keydown", onFirstTouch);
     window.addEventListener("pointerdown", nudge);
     return () => {
-      if (typeof window.cancelIdleCallback === "function") {
-        window.cancelIdleCallback(idle);
-      } else {
-        window.clearTimeout(idle);
-      }
       window.removeEventListener("pointerdown", onFirstTouch);
       window.removeEventListener("touchstart", onFirstTouch);
       window.removeEventListener("keydown", onFirstTouch);
@@ -1987,15 +1981,6 @@ export default function GamePage() {
       {hurt > 0 && <div className="flash" key={`hurt-${hurt}`} />}
       {heal > 0 && <div className="flash flash--heal" key={`heal-${heal}`} />}
 
-      {booting && (
-        <div className="veil veil--boot">
-          <div className="boot">
-            <div className="boot__bowl" />
-            <p className="boot__text">Warming up the steel pan...</p>
-          </div>
-        </div>
-      )}
-
       {phase === "playing" && (
         <button
           className="mute"
@@ -2047,15 +2032,14 @@ export default function GamePage() {
               alt="Chow Master"
               className="panel__logo"
               sizes="260px"
-              priority
             />
             <p className="panel__text">
               Drag anywhere to slide the bowl. New fruit joins as your score
               climbs, and the smaller it is the more it pays.
             </p>
 
-            <button className="btn" onClick={boot} disabled={booting}>
-              {booting ? "Loading..." : "Start"}
+            <button className="btn" onClick={boot}>
+              Start
             </button>
             <button
               className="btn btn--ghost"

@@ -587,53 +587,6 @@ input {
   border-radius: 3px;
 }
 
-/* loading screen while the audio engine downloads */
-
-.veil--boot {
-  z-index: 6;
-}
-
-.boot {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 18px;
-}
-
-.boot__bowl {
-  width: 76px;
-  height: 38px;
-  border: 5px solid var(--paper);
-  border-top: none;
-  border-radius: 0 0 76px 76px / 0 0 60px 60px;
-  background: var(--grape);
-  animation: bootSwing 1.1s ease-in-out infinite;
-}
-
-.boot__text {
-  margin: 0;
-  font-family: var(--font-display), system-ui, sans-serif;
-  font-size: 17px;
-  letter-spacing: 0.04em;
-  color: var(--sun);
-}
-
-@keyframes bootSwing {
-  0%,
-  100% {
-    transform: translateX(-16px) rotate(-9deg);
-  }
-  50% {
-    transform: translateX(16px) rotate(9deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .boot__bowl {
-    animation-duration: 2.4s;
-  }
-}
-
 /* sound toggle, above the panels so it works on every screen */
 
 .mute {
