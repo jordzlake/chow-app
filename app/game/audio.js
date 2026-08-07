@@ -327,6 +327,23 @@ export async function createAudio(rawContext) {
       soft.triggerAttackRelease("F#5", "8n", at(0.16), 0.35);
     },
 
+    // Short rising blip as a fork fires.
+    forkShot() {
+      if (disposed) return;
+      const t = at();
+      laser.triggerAttack("E5", t);
+      laser.frequency.exponentialRampTo("B6", 0.12, t);
+      laser.triggerRelease(t + 0.15);
+      pluck.triggerAttackRelease("B5", "32n", at(0.03), 0.35);
+    },
+
+    forkGained() {
+      if (disposed) return;
+      ["D5", "G5", "B5", "D6"].forEach((n, i) =>
+        pluck.triggerAttackRelease(n, "16n", at(i * 0.07), 0.45)
+      );
+    },
+
     block() {
       if (disposed) return;
       soft.triggerAttackRelease("D4", "16n", at(), 0.3);

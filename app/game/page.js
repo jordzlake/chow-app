@@ -18,7 +18,20 @@ const FRUITS = [
   { key: "apple", shape: "apple", scale: 0.92, points: 20, hue: 352, sat: 78, light: 48, unlock: 700, weight: 3 },
   { key: "kumquat", shape: "round", scale: 0.46, points: 60, hue: 33, sat: 100, light: 56, unlock: 900, weight: 2 },
   { key: "cherries", shape: "cherries", scale: 0.5, points: 80, hue: 344, sat: 80, light: 44, unlock: 1200, weight: 2 },
+  // Trinidad chow regulars, one every 250 points from 1500 on.
+  { key: "green mango", shape: "oval", scale: 1.05, points: 90, hue: 88, sat: 54, light: 44, unlock: 1500, weight: 3 },
+  { key: "pommecythere", shape: "oval", scale: 0.9, points: 110, hue: 44, sat: 82, light: 52, unlock: 1750, weight: 3 },
+  { key: "pommerac", shape: "round", scale: 0.85, points: 130, hue: 340, sat: 72, light: 46, unlock: 2000, weight: 3 },
+  { key: "five finger", shape: "star", scale: 0.95, points: 150, hue: 52, sat: 92, light: 50, unlock: 2250, weight: 2 },
+  { key: "guava", shape: "round", scale: 0.8, points: 175, hue: 68, sat: 52, light: 52, unlock: 2500, weight: 2 },
+  { key: "tamarind", shape: "pod", scale: 0.62, points: 200, hue: 28, sat: 44, light: 34, unlock: 2750, weight: 2 },
+  { key: "chenette", shape: "round", scale: 0.5, points: 240, hue: 92, sat: 46, light: 42, unlock: 3000, weight: 2 },
 ];
+
+// A fork sits beside the bowl and shoots the furthest fruit every 7 seconds.
+// Kept rarer than a power-up, and lost to a pepper rather than to a timer.
+const FORK_COOLDOWN = 7;
+const MAX_FORKS = 2;
 
 const POWERS = {
   mango: { label: "Catch all", seconds: 9, color: "#ff8a1e", timed: true },
@@ -98,6 +111,13 @@ export default function GamePage() {
       bits: [],
       pops: [],
       rings: [],
+      beams: [],
+      splashes: [],
+      forks: [],
+      nextFork: 0,
+      trailAcc: 0,
+      bowlPrevX: 0,
+      forkOut: false,
       motes: [],
       bowl: { x: 0, y: 0, w: 120, baseW: 120, h: 46, target: 0 },
       fx: { mango: 0, shield: 0, bowl: 0 },
@@ -282,7 +302,7 @@ export default function GamePage() {
         flesh: `hsl(${hue}, ${kind.sat}%, ${light}%)`,
         skin: `hsl(${hue - 4}, ${kind.sat}%, ${Math.max(18, light - 17)}%)`,
         shine: `hsla(${hue + 16}, 100%, 92%, 0.6)`,
-        spin: (Math.random() - 0.5) * 0.9, // slow tumble
+        spin: (Math.random() - 0.5) * 1.4, // slow tumble, a touch quicker
         rot: Math.random() * Math.PI * 2,
         seed: Math.random() * 12,
         vy: fallSpeed(),
@@ -327,6 +347,25 @@ export default function GamePage() {
         seed: Math.random() * 12,
         vy: fallSpeed() * PINEAPPLE_SPEED,
       });
+    };
+
+    const spawnFork = () => {
+      const r = baseRadius() * 1.0;
+      g.fruits.push({
+        kind: "fork",
+        x: place(r),
+        y: -r * 2,
+        prevBottom: -r,
+        r,
+        points: 0,
+        flesh: "#ffe9a0",
+        skin: "#c98b2a",
+        spin: 0,
+        rot: 0,
+        seed: Math.random() * 12,
+        vy: fallSpeed() * 0.6,
+      });
+      g.forkOut = true;
     };
 
     const burst = (x, y, color) => {
@@ -380,7 +419,8 @@ export default function GamePage() {
     const sweep = (endedKey) => {
       let cleared = 0;
       for (let i = g.fruits.length - 1; i >= 0; i--) {
-        if (g.fruits[i].kind === "power" || g.fruits[i].kind === "bonus") continue;
+        const k = g.fruits[i].kind;
+        if (k === "power" || k === "bonus" || k === "fork") continue;
         const f = g.fruits[i];
         g.fruits.splice(i, 1);
         if (cleared < 8) puff(f.x, f.y);
@@ -394,6 +434,35 @@ export default function GamePage() {
       }
     };
 
+    const splash = (x, y, color) => {
+      g.splashes.push({ x, y, r: 6, life: 0.42, color });
+      for (let i = 0; i < 6; i++) {
+        g.bits.push({
+          x,
+          y,
+          vx: (Math.random() - 0.5) * 210,
+          vy: -60 - Math.random() * 150,
+          life: 0.4,
+          color: i % 2 ? "#ffffff" : color,
+          r: 1.4 + Math.random() * 2.4,
+        });
+      }
+    };
+
+    // faint dust off the rim as the bowl slides
+    const trail = (x, y, dir) => {
+      g.bits.push({
+        x,
+        y,
+        vx: -dir * (40 + Math.random() * 70),
+        vy: -Math.random() * 40,
+        life: 0.34,
+        rise: true,
+        color: "rgba(255,255,255,0.9)",
+        r: 1 + Math.random() * 1.8,
+      });
+    };
+
     const pop = (x, y, text, color, size) => {
       g.pops.push({ x, y, text, color, life: 0.8, size: size || 18 });
       if (g.pops.length > 12) g.pops.shift();
@@ -401,11 +470,31 @@ export default function GamePage() {
 
     /* --------------------------------------------------------- update */
 
+    // Forks sit just outside the bowl rim. First one goes right, second left.
+    // Purely decorative as far as collision goes: the catch test still uses the
+    // bowl width alone, so a fork never widens the hit box.
+    const forkSpot = (i) => {
+      const side = i === 0 ? 1 : -1;
+      return {
+        x: g.bowl.x + side * (g.bowl.w / 2 + g.bowl.h * 0.42),
+        y: g.bowl.y - g.bowl.h * 0.18,
+        side,
+      };
+    };
+
     // Catch all pushes fruit down harder, Fruit bowl drags it to a crawl.
     const fallMultiplier = () =>
       (g.fx.mango > 0 ? 1.5 : 1) * (g.fx.bowl > 0 ? 0.4 : 1);
 
-    const loseLife = (x, y) => {
+    const collect = (f, x, y) => {
+      g.caught += 1;
+      g.score += f.points;
+      burst(x, y, f.flesh);
+      pop(x, y - 10, `+${f.points}`, "#ffffff", f.points >= 30 ? 22 : 17);
+      g.scoreDirty = true;
+    };
+
+    const loseLife = (x, y, cause) => {
       // Fruit bowl is a free scoring window, so a drop during it costs nothing.
       // Kept quiet rather than popping text, since drops come thick and fast.
       if (g.fx.bowl > 0 && g.fx.shield <= 0) {
@@ -415,10 +504,24 @@ export default function GamePage() {
       if (g.fx.shield > 0) {
         audioRef.current?.block();
         burst(x, y, POWERS.shield.color);
-        pop(x, y, "Blocked", POWERS.shield.color, 16);
+        if (cause === "pepper") {
+          // Blocking a pepper is a small win, so it pays.
+          g.score += 25;
+          g.scoreDirty = true;
+          pop(x, y, "Blocked +25", POWERS.shield.color, 17);
+        } else {
+          pop(x, y, "Blocked", POWERS.shield.color, 16);
+        }
         return;
       }
       audioRef.current?.miss();
+      // A pepper is the only thing that costs a fork, and only when it lands.
+      if (cause === "pepper" && g.forks.length > 0) {
+        const lost = forkSpot(g.forks.length - 1);
+        g.forks.pop();
+        burst(lost.x, lost.y, "#c98b2a");
+        pop(lost.x, lost.y - 12, "Fork lost", "#ffd0dd", 16);
+      }
       g.lives -= 1;
       g.shake = 0.3;
       setLives(g.lives);
@@ -485,6 +588,31 @@ export default function GamePage() {
       if (g.nextBonus <= 0 && g.caught >= 3) {
         spawnBonus();
         g.nextBonus = 36000 + Math.random() * 21000;
+      }
+
+      // Forks are rarer than power-ups: first around 25s, then every 24-38s,
+      // and only while a slot is free.
+      g.nextFork -= dt * 1000;
+      if (g.nextFork <= 0 && g.caught >= 5) {
+        if (g.forkOut || g.forks.length >= MAX_FORKS) {
+          g.nextFork = 2500;
+        } else {
+          spawnFork();
+          g.nextFork = 24000 + Math.random() * 14000;
+        }
+      }
+
+      // dust off the rim while the bowl is sliding
+      const moved = g.bowl.x - g.bowlPrevX;
+      g.bowlPrevX = g.bowl.x;
+      const speed = Math.abs(moved) / Math.max(dt, 0.001);
+      if (speed > 120) {
+        g.trailAcc += dt;
+        if (g.trailAcc > 0.03) {
+          g.trailAcc = 0;
+          const dir = Math.sign(moved);
+          trail(g.bowl.x - dir * g.bowl.w * 0.42, g.bowl.y + g.bowl.h * 0.35, dir);
+        }
       }
 
       const rimY = g.bowl.y;
@@ -566,6 +694,22 @@ export default function GamePage() {
               audioRef.current?.powerUp(f.power);
               pop(f.x, rimY - 14, spec.label, spec.color, 19);
             }
+          } else if (f.kind === "fork") {
+            g.forkOut = false;
+            if (g.forks.length < MAX_FORKS) {
+              g.forks.push({ cd: 0 }); // ready straight away
+              audioRef.current?.forkGained();
+              ring(f.x, rimY, "#ffd84d", 0);
+              burst(f.x, rimY, "#c98b2a");
+              pop(f.x, rimY - 14, "Fork!", "#ffe9a0", 20);
+            } else {
+              // both slots full, so it pays out instead of being wasted
+              g.score += 150;
+              g.scoreDirty = true;
+              audioRef.current?.fullHealth();
+              burst(f.x, rimY, "#ffd84d");
+              pop(f.x, rimY - 14, "+150", "#ffe9a0", 20);
+            }
           } else if (f.kind === "bonus") {
             g.score += f.points;
             g.scoreDirty = true;
@@ -596,15 +740,11 @@ export default function GamePage() {
             } else {
               audioRef.current?.pepper();
               burst(f.x, rimY, "#e02020");
-              loseLife(f.x, rimY);
+              loseLife(f.x, rimY, "pepper");
             }
           } else {
-            g.caught += 1;
-            g.score += f.points;
             audioRef.current?.catchFruit();
-            burst(f.x, rimY, f.flesh);
-            pop(f.x, rimY - 10, `+${f.points}`, "#ffffff", f.points >= 30 ? 22 : 17);
-            g.scoreDirty = true;
+            collect(f, f.x, rimY);
           }
           continue;
         }
@@ -613,8 +753,61 @@ export default function GamePage() {
           g.fruits.splice(i, 1);
           // A missed power-up is just a missed chance, never a lost life.
           if (f.kind === "power") g.powerOut = false;
-          else if (f.kind === "fruit") loseLife(f.x, g.h - 40);
+          else if (f.kind === "fork") g.forkOut = false;
+          else if (f.kind === "fruit") {
+            // a splash where it lands, whether or not it costs a life
+            splash(f.x, g.h - Math.max(20, g.h * 0.03), f.flesh);
+            loseLife(f.x, g.h - 40, "drop");
+          }
         }
+      }
+
+      // Each fork counts down on its own and shoots the fruit furthest away
+      // horizontally, at whatever height it happens to be. Peppers, power-ups
+      // and the pineapple are never targeted.
+      for (let i = 0; i < g.forks.length; i++) {
+        const fk = g.forks[i];
+        fk.cd = Math.max(0, fk.cd - dt);
+        if (fk.cd > 0) continue;
+
+        let target = null;
+        let bestDist = -1;
+        for (const f of g.fruits) {
+          if (f.kind !== "fruit") continue;
+          if (f.y < -f.r) continue; // not on screen yet
+          const d = Math.abs(f.x - g.bowl.x);
+          if (d > bestDist) {
+            bestDist = d;
+            target = f;
+          }
+        }
+        if (!target) continue;
+
+        const spot = forkSpot(i);
+        g.beams.push({
+          x1: spot.x,
+          y1: spot.y,
+          x2: target.x,
+          y2: target.y,
+          life: 0.28,
+          max: 0.28,
+        });
+        audioRef.current?.forkShot();
+        collect(target, target.x, target.y);
+        g.fruits.splice(g.fruits.indexOf(target), 1);
+        fk.cd = FORK_COOLDOWN;
+      }
+
+      for (let i = g.beams.length - 1; i >= 0; i--) {
+        g.beams[i].life -= dt;
+        if (g.beams[i].life <= 0) g.beams.splice(i, 1);
+      }
+
+      for (let i = g.splashes.length - 1; i >= 0; i--) {
+        const sp = g.splashes[i];
+        sp.life -= dt;
+        sp.r += 90 * dt;
+        if (sp.life <= 0) g.splashes.splice(i, 1);
       }
 
       for (let i = g.bits.length - 1; i >= 0; i--) {
@@ -864,10 +1057,86 @@ export default function GamePage() {
       }
     };
 
+    const drawOval = (f) => {
+      const r = f.r;
+      ctx.fillStyle = f.skin;
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.06, r * 0.72, r * 0.98, 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = f.flesh;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 0.68, r * 0.92, 0.12, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = f.shine || "rgba(255,255,255,0.5)";
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.26, -r * 0.3, r * 0.18, r * 0.32, -0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#6b3b17";
+      ctx.lineWidth = Math.max(2, r * 0.1);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(r * 0.1, -r * 0.86);
+      ctx.lineTo(r * 0.2, -r * 1.12);
+      ctx.stroke();
+    };
+
+    const drawStarFruit = (f) => {
+      const r = f.r;
+      // five finger, seen end on: a five-point star section
+      const points = 5;
+      const path = (rad, inner) => {
+        ctx.beginPath();
+        for (let i = 0; i < points * 2; i++) {
+          const ang = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
+          const rr = i % 2 === 0 ? rad : rad * inner;
+          const px = Math.cos(ang) * rr;
+          const py = Math.sin(ang) * rr;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+      };
+      ctx.fillStyle = f.skin;
+      path(r, 0.44);
+      ctx.fill();
+      ctx.fillStyle = f.flesh;
+      path(r * 0.88, 0.46);
+      ctx.fill();
+      ctx.fillStyle = f.shine || "rgba(255,255,255,0.45)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    const drawPod = (f) => {
+      const r = f.r;
+      // tamarind: a knobbly curved pod
+      ctx.fillStyle = f.skin;
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.34, -r * 1.0);
+      ctx.quadraticCurveTo(r * 0.62, -r * 0.3, r * 0.24, r * 1.0);
+      ctx.quadraticCurveTo(-r * 0.36, r * 0.66, -r * 0.34, -r * 1.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = f.flesh;
+      for (const t of [-0.62, -0.18, 0.28, 0.7]) {
+        ctx.beginPath();
+        ctx.arc(r * (0.04 + t * 0.22), r * t, r * 0.26, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.16, -r * 0.5, r * 0.08, r * 0.24, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
     const drawFruit = (f) => {
       if (f.shape === "long") drawCucumber(f);
       else if (f.shape === "apple") drawApple(f);
       else if (f.shape === "cherries") drawCherries(f);
+      else if (f.shape === "oval") drawOval(f);
+      else if (f.shape === "star") drawStarFruit(f);
+      else if (f.shape === "pod") drawPod(f);
       else drawCitrus(f);
     };
 
@@ -1148,6 +1417,61 @@ export default function GamePage() {
       ctx.globalAlpha = 1;
     };
 
+    // Small fork, drawn beside the bowl. Greyed while its shot is recharging.
+    const drawForkIcon = (x, y, side, ready, scale) => {
+      const u = scale;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(side * 0.32);
+      ctx.globalAlpha = ready ? 1 : 0.38;
+
+      ctx.strokeStyle = "#c98b2a";
+      ctx.lineWidth = Math.max(2.4, u * 0.3);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(0, u * 0.2);
+      ctx.lineTo(0, u * 1.5);
+      ctx.stroke();
+
+      ctx.fillStyle = ready ? "#ffe9a0" : "#d8cdb4";
+      ctx.beginPath();
+      ctx.ellipse(0, u * 0.05, u * 0.42, u * 0.34, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = ready ? "#ffe9a0" : "#d8cdb4";
+      ctx.lineWidth = Math.max(1.8, u * 0.2);
+      for (const tx of [-0.42, 0, 0.42]) {
+        ctx.beginPath();
+        ctx.moveTo(u * tx, u * 0.05);
+        ctx.lineTo(u * tx, -u * 1.0);
+        ctx.stroke();
+      }
+
+      if (ready) {
+        ctx.fillStyle = "rgba(255,233,160,0.28)";
+        ctx.beginPath();
+        ctx.arc(0, 0, u * 1.15, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    };
+
+    const drawForkPickup = (f) => {
+      const r = f.r;
+      const pulse = 1 + Math.sin(g.elapsed * 7 + f.seed) * 0.08;
+      ctx.strokeStyle = "rgba(255,255,255,0.8)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.2 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,220,120,0.28)";
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 1.1, 0, Math.PI * 2);
+      ctx.fill();
+      drawForkIcon(0, -r * 0.3, 0, true, r * 0.62);
+    };
+
     const drawItem = (f) => {
       ctx.save();
       ctx.translate(f.x, f.y);
@@ -1156,10 +1480,12 @@ export default function GamePage() {
       // Peppers rotate their body internally so the flames keep pointing up,
       // and power-ups stay level to stay readable.
       if (f.kind === "fruit") {
-        ctx.rotate(f.shape === "round" ? f.rot : Math.sin(f.rot) * 0.32);
+        const tumbles = f.shape === "round" || f.shape === "star";
+        ctx.rotate(tumbles ? f.rot : Math.sin(f.rot) * 0.32);
       }
       if (f.kind === "bonus") ctx.rotate(f.rot);
       if (f.kind === "power") drawPower(f);
+      else if (f.kind === "fork") drawForkPickup(f);
       else if (f.kind === "bonus") drawPineapple(f);
       else if (f.kind === "pepper") drawPepper(f);
       else drawFruit(f);
@@ -1209,6 +1535,12 @@ export default function GamePage() {
       ctx.ellipse(x, y + h * 0.02, w * 0.41, h * 0.12, 0, 0, Math.PI * 2);
       ctx.fill();
 
+      // forks, outside the rim and outside the hit box
+      for (let i = 0; i < g.forks.length; i++) {
+        const spot = forkSpot(i);
+        drawForkIcon(spot.x, spot.y, spot.side, g.forks[i].cd <= 0, h * 0.36);
+      }
+
       // shield dome
       if (g.fx.shield > 0) {
         const fade = Math.min(1, g.fx.shield / 0.6);
@@ -1247,6 +1579,36 @@ export default function GamePage() {
         ctx.lineWidth = 2 + 5 * fade;
         ctx.beginPath();
         ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      for (const bm of g.beams) {
+        const fade = Math.max(0, bm.life / bm.max);
+        ctx.globalAlpha = fade;
+        ctx.lineCap = "round";
+        ctx.strokeStyle = "rgba(255,220,120,0.55)";
+        ctx.lineWidth = 9 * fade;
+        ctx.beginPath();
+        ctx.moveTo(bm.x1, bm.y1);
+        ctx.lineTo(bm.x2, bm.y2);
+        ctx.stroke();
+        ctx.strokeStyle = "#fffbe0";
+        ctx.lineWidth = 3 * fade;
+        ctx.beginPath();
+        ctx.moveTo(bm.x1, bm.y1);
+        ctx.lineTo(bm.x2, bm.y2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      for (const sp of g.splashes) {
+        const fade = Math.max(0, sp.life / 0.42);
+        ctx.globalAlpha = fade * 0.75;
+        ctx.strokeStyle = sp.color;
+        ctx.lineWidth = 2 + 3 * fade;
+        ctx.beginPath();
+        ctx.ellipse(sp.x, sp.y, sp.r, sp.r * 0.36, 0, Math.PI, 0);
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
@@ -1439,6 +1801,12 @@ export default function GamePage() {
     g.bits = [];
     g.pops = [];
     g.rings = [];
+    g.beams = [];
+    g.splashes = [];
+    g.forks = [];
+    g.nextFork = 25000;
+    g.forkOut = false;
+    g.bowlPrevX = g.w / 2;
     g.elapsed = 0;
     g.caught = 0;
     g.score = 0;
@@ -1655,6 +2023,25 @@ export default function GamePage() {
                   style={{ background: "hsl(344,80%,44%)", width: 9, height: 9 }}
                 />
                 Cherries 80 at 1200
+              </li>
+            </ul>
+
+            <p className="panel__text">
+              From 1500 a new chow fruit joins every 250 points — green mango,
+              pommecythere, pommerac, five finger, guava, tamarind and chenette,
+              worth 90 up to 240 each.
+            </p>
+
+            <ul className="rules rules--stack">
+              <li>
+                <b style={{ color: "#ffe9a0" }}>Fork</b> — rarer than a power-up.
+                It sits beside the bowl and spears the fruit furthest away every
+                7 seconds, at any height. Two at most, and a pepper that lands
+                knocks one off. It never widens your bowl.
+              </li>
+              <li>
+                Blocking a pepper with the <b style={{ color: POWERS.shield.color }}>Shield</b>{" "}
+                pays 25.
               </li>
             </ul>
 
