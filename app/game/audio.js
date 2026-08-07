@@ -1,37 +1,49 @@
 "use client";
 
 /*
-  Audio engine, rebuilt.
+  Audio engine, written directly against Web Audio.
 
-  Everything below follows three rules learned the hard way on this project:
+  This used to be Tone.js. Everything it was doing for us amounted to
+  oscillators with gain envelopes, two biquad filters and a step sequencer,
+  which is what is below. Tone was shipping 78 KB gzipped (333 KB raw) as a
+  separate chunk for that, and it had to be downloaded before a single sound
+  could play, which was the load time. Its context wrapper was also the reason
+  the first gesture kept failing: setContext has to happen after the module
+  resolves, and an await can land outside the gesture that granted permission.
 
-  1. NO CONVOLUTION. Tone's Reverb is a ConvolverNode, which the Tone
-     performance guide names as the single most processor-intensive node
-     available. It also has to render its impulse response through an offline
-     context before it makes any sound, which was most of the load time.
+  With no module to fetch, the AudioContext is created synchronously inside the
+  click and sound is available on the very first press.
 
-  2. NO NOISE SOURCES. Every NoiseSynth is gone, percussion included. A noise
-     generator through a low-pass is indistinguishable from a buzz on a small
-     speaker, and it was firing on the clave of every bar.
-
-  3. NO DYNAMICS. No compressor, no limiter. Both modulate gain on a shared bus,
-     which ducks music against effects and, in the limiter's case, modulates at
-     roughly 100 Hz. The chain runs around -25 dBFS, so there is nothing to
-     protect against.
-
-  Two further rules about scheduling:
-
-  4. Events are scheduled a short way ahead so they never land on the edge of
-     the current render quantum, but the total delay is kept near 60 ms. A big
-     output buffer stops underruns but is heard as lag, which matters in a game
-     where a sound answers a touch.
-
-  5. Nothing monophonic is ever retriggered while it is still sounding. Pitch
-     sweeps build a throwaway oscillator each time instead of sharing one voice,
-     because overlapping ramps on a single oscillator glitch badly.
-
-  Nothing is sampled, so there are no files to fetch and nothing to 404.
+  Design rules carried over, all of which were learned the hard way here:
+    - No convolution reverb. It was the most expensive node in the graph and
+      had to render an impulse response before making any sound.
+    - No noise sources anywhere, percussion included. A noise generator through
+      a filter is indistinguishable from a buzz on a small speaker.
+    - No compressor and no limiter. Both modulate gain on a bus shared by music
+      and effects. The chain peaks far below clipping, so neither is needed.
+    - Every note is its own oscillator, ramped up from silence and down to it.
+      Nothing is ever retriggered while still sounding, so nothing clicks.
+    - Notes stay above ~300 Hz, since phone speakers cannot reproduce below it.
 */
+
+/* ------------------------------------------------------------------ notes */
+
+const SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+// "F#4" / "Eb3" / "C5" -> Hz
+function hz(note) {
+  const m = /^([A-G])([#b]?)(-?\d)$/.exec(note);
+  if (!m) return 440;
+  let semi = SEMITONES[m[1]];
+  if (m[2] === "#") semi += 1;
+  if (m[2] === "b") semi -= 1;
+  const midi = semi + (Number(m[3]) + 1) * 12;
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+const db = (value) => Math.pow(10, value / 20);
+
+/* ----------------------------------------------------------------- music */
 
 // C major pentatonic. Every catch walks one step up, so a clean run plays a
 // rising phrase; a miss resets it to the bottom.
@@ -50,7 +62,7 @@ const PROGRESSIONS = {
       ["D4", "F4", "A4", "C5"],
       ["G3", "B3", "D4", "F4"],
     ],
-    roots: ["C2", "A1", "D2", "G1"],
+    roots: ["C2", "A2", "D2", "G2"],
   },
   bright: {
     chords: [
@@ -59,7 +71,7 @@ const PROGRESSIONS = {
       ["E4", "G4", "B4", "D5"],
       ["A3", "C#4", "E4", "G4"],
     ],
-    roots: ["D2", "B1", "E2", "A1"],
+    roots: ["D2", "B2", "E2", "A2"],
   },
   dream: {
     chords: [
@@ -68,7 +80,7 @@ const PROGRESSIONS = {
       ["G3", "B3", "D4", "F4"],
       ["C4", "E4", "G4", "B4"],
     ],
-    roots: ["F2", "D2", "G1", "C2"],
+    roots: ["F2", "D2", "G2", "C2"],
   },
   minor: {
     chords: [
@@ -77,7 +89,7 @@ const PROGRESSIONS = {
       ["F3", "A3", "C4", "E4"],
       ["E3", "G#3", "B3", "D4"],
     ],
-    roots: ["A1", "D2", "F2", "E2"],
+    roots: ["A2", "D2", "F2", "E2"],
   },
 };
 
@@ -99,197 +111,238 @@ const MOTIFS = {
   fork: ["D5", "G5", "B5", "D6"],
 };
 
-// Bossa comping. Bar one syncopates on the and-of-two, bar two pushes earlier.
-// The bass keeps a two-feel: root on one, fifth on three. No percussion.
+// Bossa comping: bar one syncopates on the and-of-two, bar two pushes earlier.
+// Bass keeps a two-feel, root on one and fifth on three. No percussion.
 const COMP_A = [0, 3, 6];
 const COMP_B = [0, 2, 5];
 const BASS_HITS = [0, 4];
 
-// Tone is a large module. Prefetching it on mount keeps the wait off the
-// Start button without creating an AudioContext before the player has acted.
-let tonePromise = null;
+const STEPS = 32; // four bars of eighths
+const LEAD = 0.03; // keeps events off the edge of the current render quantum
+const SCHEDULE_AHEAD = 0.15;
+const TICK_MS = 25;
+
+// Nothing to download any more. Kept so callers need not change.
 export function preloadAudio() {
-  if (!tonePromise) tonePromise = import("tone");
-  return tonePromise;
+  return Promise.resolve();
 }
 
 /*
-  `rawContext` must be an AudioContext that the page created synchronously
-  inside a real click or touch handler. That is the only reliable way to get
-  audio permission: creating it after an await, even an await that resolves
-  from cache, can happen outside the gesture and leaves the context suspended.
+  `rawContext` should be an AudioContext the page created synchronously inside
+  a click or touch handler. One is created here if it is missing, but passing
+  it in is what guarantees the gesture is honoured.
 */
 export async function createAudio(rawContext) {
-  const Tone = await preloadAudio();
+  const Ctx = typeof window !== "undefined"
+    ? window.AudioContext || window.webkitAudioContext
+    : null;
+  if (!Ctx) return null;
 
-  if (rawContext) {
-    Tone.setContext(rawContext);
-  } else {
-    Tone.setContext(new Tone.Context({ latencyHint: "interactive" }));
-  }
+  const ctx = rawContext || new Ctx({ latencyHint: "interactive" });
+  try {
+    if (ctx.state === "suspended") await ctx.resume();
+  } catch {}
 
-  // Delay budget, kept deliberately tight now that the graph is cheap. The
-  // "playback" latency hint I used before asks Chrome for a buffer up to
-  // ~200 ms, which on top of lookAhead and lead put a third of a second
-  // between catching a fruit and hearing it.
-  Tone.getContext().lookAhead = 0.03;
+  /* --------------------------------------------------------- routing */
 
-  await Tone.start();
+  const master = ctx.createGain();
+  master.gain.value = db(-3);
+  master.connect(ctx.destination);
 
-  const transport = Tone.getTransport();
-  transport.bpm.value = MODES.base.bpm;
-
-  /* ------------------------------------------------------------ routing */
-
-  const master = new Tone.Volume(-3).toDestination();
-
-  const sfxBus = new Tone.Volume(-4);
-  const sfxFilter = new Tone.Filter(3600, "lowpass");
-  sfxBus.connect(sfxFilter);
+  const sfxFilter = ctx.createBiquadFilter();
+  sfxFilter.type = "lowpass";
+  sfxFilter.frequency.value = 3600;
   sfxFilter.connect(master);
 
-  const musicBus = new Tone.Volume(MODES.base.vol);
-  const musicFilter = new Tone.Filter(MODES.base.filter, "lowpass");
-  musicBus.connect(musicFilter);
+  const sfxBus = ctx.createGain();
+  sfxBus.gain.value = db(-4);
+  sfxBus.connect(sfxFilter);
+
+  const musicFilter = ctx.createBiquadFilter();
+  musicFilter.type = "lowpass";
+  musicFilter.frequency.value = MODES.base.filter;
   musicFilter.connect(master);
 
-  /* ------------------------------------------------------------- voices */
+  const musicBus = ctx.createGain();
+  musicBus.gain.value = db(MODES.base.vol);
+  musicBus.connect(musicFilter);
 
-  const pluck = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "triangle" },
-    envelope: { attack: 0.005, decay: 0.28, sustain: 0, release: 0.35 },
-  }).connect(sfxBus);
-  pluck.maxPolyphony = 16;
-  pluck.volume.value = -6;
+  /* ---------------------------------------------------------- voices */
 
-  const soft = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "sine" },
-    envelope: { attack: 0.03, decay: 0.3, sustain: 0, release: 0.4 },
-  }).connect(sfxBus);
-  soft.maxPolyphony = 16;
-  soft.volume.value = -4;
+  let disposed = false;
+  let muted = false;
 
-  // Replaces the old brown-noise thud. A low sine gives the same weight under
-  // a hit without putting a noise generator anywhere near the output.
-  const body = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "sine" },
-    envelope: { attack: 0.008, decay: 0.22, sustain: 0, release: 0.2 },
-  }).connect(sfxBus);
-  body.maxPolyphony = 6;
-  body.volume.value = -8;
+  /*
+    One oscillator per note, disposed when it ends. This is the thing that
+    removed the clicks: a fresh voice can never be cut off mid-cycle by a
+    retrigger, and the gain always starts at zero and ends at zero, so there is
+    no step change anywhere for the speaker to snap on.
+  */
+  const note = (bus, freq, t, hold, peak, type, attack, tail) => {
+    if (disposed) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || "triangle";
+    osc.frequency.setValueAtTime(freq, t);
+    osc.connect(gain);
+    gain.connect(bus);
 
-  const comp = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "triangle" },
-    envelope: { attack: 0.012, decay: 0.9, sustain: 0.04, release: 0.7 },
-  }).connect(musicBus);
-  comp.maxPolyphony = 12;
-  comp.volume.value = -9;
+    const a = attack == null ? 0.006 : attack;
+    const decayTo = t + hold + (tail == null ? 0.25 : tail);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(Math.max(peak, 0.0002), t + a);
+    gain.gain.exponentialRampToValueAtTime(0.0001, decayTo);
 
-  const bass = new Tone.Synth({
-    oscillator: { type: "sine" },
-    envelope: { attack: 0.02, decay: 0.5, sustain: 0.2, release: 0.5 },
-  }).connect(musicBus);
-  bass.volume.value = -6;
+    osc.start(t);
+    osc.stop(decayTo + 0.02);
+    osc.onended = () => {
+      try {
+        osc.disconnect();
+        gain.disconnect();
+      } catch {}
+    };
+  };
 
-  const drone = new Tone.PolySynth(Tone.Synth, {
-    oscillator: { type: "sine" },
-    envelope: { attack: 1.6, decay: 0.4, sustain: 0.6, release: 2.6 },
-  }).connect(musicBus);
-  drone.maxPolyphony = 4;
-  drone.volume.value = -20;
+  // A pitch sweep, also on its own throwaway oscillator so two can overlap.
+  const glide = (fromNote, toNote, dur, peak) => {
+    if (disposed) return;
+    const t = at();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(hz(fromNote), t);
+    osc.frequency.exponentialRampToValueAtTime(hz(toNote), t + dur);
+    osc.connect(gain);
+    gain.connect(sfxBus);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(peak, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.start(t);
+    osc.stop(t + dur + 0.03);
+    osc.onended = () => {
+      try {
+        osc.disconnect();
+        gain.disconnect();
+      } catch {}
+    };
+  };
 
-  /* --------------------------------------------------------- scheduling */
+  // sustained pair for the shield bed
+  let droneNodes = null;
+  const droneOn = (on) => {
+    const t = ctx.currentTime;
+    if (on && !droneNodes) {
+      droneNodes = ["C3", "G3"].map((n) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = hz(n);
+        osc.connect(gain);
+        gain.connect(musicBus);
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(db(-20), t + 1.6);
+        osc.start(t);
+        return { osc, gain };
+      });
+    } else if (!on && droneNodes) {
+      const dying = droneNodes;
+      droneNodes = null;
+      for (const d of dying) {
+        d.gain.gain.cancelScheduledValues(t);
+        d.gain.gain.setValueAtTime(Math.max(d.gain.gain.value, 0.0002), t);
+        d.gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+        d.osc.stop(t + 1.3);
+        d.osc.onended = () => {
+          try {
+            d.osc.disconnect();
+            d.gain.disconnect();
+          } catch {}
+        };
+      }
+    }
+  };
 
-  // 30 ms is enough to keep events off the edge of the current render quantum
-  // without the sound trailing the catch. With lookAhead that totals ~60 ms.
-  const LEAD = 0.03;
+  /* ------------------------------------------------------- scheduling */
+
   let lastAt = 0;
   const at = (offset) => {
-    const now = Tone.now() + LEAD + (offset || 0);
+    const now = ctx.currentTime + LEAD + (offset || 0);
     lastAt = Math.max(now, lastAt + 0.012);
     return lastAt;
   };
 
-  let step = 0;
-  let disposed = false;
+  let step = 0; // position in the pentatonic phrase
   let modeStack = [];
-  let droneOn = false;
   let menuTimer = null;
   let prog = PROGRESSIONS.base;
 
-  // A throwaway oscillator per sweep. Sharing one voice meant a second sweep
-  // could start while the first was still ramping, and overlapping frequency
-  // ramps on one oscillator sound broken.
-  const glide = (from, to, dur, peak) => {
+  /*
+    Lookahead sequencer. A timer wakes every 25 ms and schedules whatever falls
+    inside the next 150 ms, so the audio clock stays exact even when the main
+    thread stalls behind a frame of canvas work.
+  */
+  let seqTimer = null;
+  let seqStep = 0;
+  let nextStepTime = 0;
+  let bpm = MODES.base.bpm;
+  let targetBpm = MODES.base.bpm;
+
+  const scheduleStep = (index, time) => {
+    const bar = Math.floor(index / 8) % 4;
+    const e = index % 8;
+    const odd = bar % 2 === 1;
+
+    if ((odd ? COMP_B : COMP_A).includes(e)) {
+      for (const n of prog.chords[bar]) {
+        note(musicBus, hz(n), time, 0.18, db(-9) * 0.5, "triangle", 0.012, 0.7);
+      }
+    }
+    if (BASS_HITS.includes(e)) {
+      note(musicBus, hz(prog.roots[bar]), time, e === 0 ? 0.32 : 0.18,
+           db(-6) * 0.55, "sine", 0.02, 0.35);
+    }
+  };
+
+  const tick = () => {
     if (disposed) return;
-    const t = at();
-    const amp = new Tone.Gain(0).connect(sfxBus);
-    const osc = new Tone.Oscillator({ frequency: from, type: "sine" }).connect(amp);
-    osc.start(t);
-    osc.frequency.exponentialRampTo(to, dur, t);
-    // ramped in and out of silence, so there is no step at either end
-    amp.gain.setValueAtTime(0, t);
-    amp.gain.linearRampToValueAtTime(peak, t + 0.02);
-    amp.gain.linearRampToValueAtTime(0, t + dur);
-    osc.stop(t + dur + 0.05);
-    setTimeout(() => {
-      try {
-        osc.dispose();
-        amp.dispose();
-      } catch {}
-    }, (dur + 0.6) * 1000);
+    // ease toward the mode's tempo instead of jumping
+    bpm += (targetBpm - bpm) * 0.08;
+    const eighth = 60 / bpm / 2;
+    while (nextStepTime < ctx.currentTime + SCHEDULE_AHEAD) {
+      scheduleStep(seqStep, Math.max(nextStepTime, ctx.currentTime + 0.01));
+      seqStep = (seqStep + 1) % STEPS;
+      nextStepTime += eighth;
+    }
+  };
+
+  const startSeq = () => {
+    if (seqTimer) return;
+    nextStepTime = ctx.currentTime + 0.1;
+    seqTimer = setInterval(tick, TICK_MS);
+  };
+  const stopSeq = () => {
+    if (!seqTimer) return;
+    clearInterval(seqTimer);
+    seqTimer = null;
   };
 
   const applyMode = () => {
     const key = modeStack.length ? modeStack[modeStack.length - 1] : "base";
     const cfg = MODES[key] || MODES.base;
-    transport.bpm.rampTo(cfg.bpm, 1.1);
-    musicFilter.frequency.rampTo(cfg.filter, 0.7);
-    musicBus.volume.rampTo(cfg.vol, 0.9);
+    const t = ctx.currentTime;
+    targetBpm = cfg.bpm;
+    musicFilter.frequency.setTargetAtTime(cfg.filter, t, 0.3);
+    musicBus.gain.setTargetAtTime(db(cfg.vol), t, 0.3);
     prog = PROGRESSIONS[cfg.prog];
-
-    if (cfg.drone && !droneOn) {
-      droneOn = true;
-      drone.triggerAttack(["C3", "G3"], at());
-    } else if (!cfg.drone && droneOn) {
-      droneOn = false;
-      drone.releaseAll(at());
-    }
+    droneOn(!!cfg.drone);
   };
 
-  /* ---------------------------------------------------------- the bed */
-
-  const EVENTS = [];
-  for (let bar = 0; bar < 4; bar++) {
-    for (let e = 0; e < 8; e++) EVENTS.push({ bar, e });
-  }
-
-  const seq = new Tone.Sequence(
-    (time, v) => {
-      // No draw calls or DOM work in here: this runs on a worker clock, well
-      // ahead of when the sound is heard.
-      const chord = prog.chords[v.bar];
-      const root = prog.roots[v.bar];
-      const odd = v.bar % 2 === 1;
-      if ((odd ? COMP_B : COMP_A).includes(v.e)) {
-        comp.triggerAttackRelease(chord, "8n", time, 0.16);
-      }
-      if (BASS_HITS.includes(v.e)) {
-        bass.triggerAttackRelease(root, v.e === 0 ? "4n" : "8n", time, 0.3);
-      }
-    },
-    EVENTS,
-    "8n"
-  );
-  seq.start(0);
-
-  /* ---------------------------------------------------------------- api */
+  /* -------------------------------------------------------------- api */
 
   const api = {
     catchFruit() {
-      if (disposed) return;
-      const note = SCALE[Math.min(step, SCALE.length - 1)];
-      pluck.triggerAttackRelease(note, "16n", at(), 0.5);
+      const n = SCALE[Math.min(step, SCALE.length - 1)];
+      note(sfxBus, hz(n), at(), 0.12, 0.5, "triangle", 0.005, 0.3);
       step = step + 1 >= SCALE.length ? WRAP_TO : step + 1;
     },
 
@@ -298,10 +351,9 @@ export async function createAudio(rawContext) {
     },
 
     powerUp(key) {
-      if (disposed) return;
       const motif = MOTIFS[key] || MOTIFS.mango;
       motif.forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "16n", at(i * 0.075), 0.45)
+        note(sfxBus, hz(n), at(i * 0.075), 0.12, 0.45, "triangle", 0.005, 0.3)
       );
       if (MODES[key]) {
         modeStack = modeStack.filter((k) => k !== key).concat(key);
@@ -310,123 +362,108 @@ export async function createAudio(rawContext) {
     },
 
     powerDown(key) {
-      if (disposed) return;
       modeStack = modeStack.filter((k) => k !== key);
       applyMode();
-      soft.triggerAttackRelease("G3", "16n", at(), 0.2);
+      note(sfxBus, hz("G3"), at(), 0.1, 0.2, "sine", 0.02, 0.25);
     },
 
     heal() {
-      if (disposed) return;
       MOTIFS.health.forEach((n, i) =>
-        soft.triggerAttackRelease(n, "8n", at(i * 0.09), 0.4)
+        note(sfxBus, hz(n), at(i * 0.09), 0.18, 0.4, "sine", 0.02, 0.35)
       );
     },
 
     fullHealth() {
-      if (disposed) return;
       ["D5", "A5"].forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "16n", at(i * 0.08), 0.45)
+        note(sfxBus, hz(n), at(i * 0.08), 0.12, 0.45, "triangle", 0.005, 0.3)
       );
-      soft.triggerAttackRelease("F#5", "8n", at(0.16), 0.35);
+      note(sfxBus, hz("F#5"), at(0.16), 0.16, 0.35, "sine", 0.02, 0.3);
     },
 
     bonus() {
-      if (disposed) return;
       glide("C5", "C7", 0.26, 0.09);
       ["G5", "A5", "C6", "E6"].forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "32n", at(i * 0.05), 0.4)
+        note(sfxBus, hz(n), at(i * 0.05), 0.08, 0.4, "triangle", 0.004, 0.22)
       );
     },
 
     forkShot() {
-      if (disposed) return;
       glide("E5", "B6", 0.12, 0.07);
-      pluck.triggerAttackRelease("B5", "32n", at(0.03), 0.35);
+      note(sfxBus, hz("B5"), at(0.03), 0.07, 0.35, "triangle", 0.004, 0.2);
     },
 
     forkGained() {
-      if (disposed) return;
       MOTIFS.fork.forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "16n", at(i * 0.07), 0.45)
+        note(sfxBus, hz(n), at(i * 0.07), 0.12, 0.45, "triangle", 0.005, 0.3)
       );
     },
 
     block() {
-      if (disposed) return;
-      soft.triggerAttackRelease("D4", "16n", at(), 0.3);
+      note(sfxBus, hz("D4"), at(), 0.1, 0.3, "sine", 0.02, 0.25);
     },
 
-    // Above 300 Hz, where a phone speaker can actually reproduce it.
     miss() {
-      if (disposed) return;
       step = 0;
-      soft.triggerAttackRelease("Eb4", "16n", at(), 0.5);
-      soft.triggerAttackRelease("D4", "8n", at(0.085), 0.45);
-      body.triggerAttackRelease("D3", "16n", at(0.01), 0.4);
+      note(sfxBus, hz("Eb4"), at(), 0.1, 0.5, "sine", 0.02, 0.25);
+      note(sfxBus, hz("D4"), at(0.085), 0.16, 0.45, "sine", 0.02, 0.3);
+      note(sfxBus, hz("D3"), at(0.01), 0.1, 0.4, "sine", 0.01, 0.2);
     },
 
     pepper() {
-      if (disposed) return;
       step = 0;
-      body.triggerAttackRelease("F3", "8n", at(), 0.5);
-      soft.triggerAttackRelease("F4", "8n", at(0.02), 0.5);
-      soft.triggerAttackRelease("Gb4", "8n", at(0.03), 0.42);
+      note(sfxBus, hz("F3"), at(), 0.16, 0.5, "sine", 0.01, 0.25);
+      note(sfxBus, hz("F4"), at(0.02), 0.16, 0.5, "sine", 0.02, 0.3);
+      note(sfxBus, hz("Gb4"), at(0.03), 0.16, 0.42, "sine", 0.02, 0.3);
     },
 
     scorpion() {
-      if (disposed) return;
       step = 0;
-      body.triggerAttackRelease("D3", "4n", at(), 0.55);
+      note(sfxBus, hz("D3"), at(), 0.3, 0.55, "sine", 0.01, 0.35);
       glide("A5", "A2", 0.5, 0.1);
     },
 
     sweep() {
-      if (disposed) return;
       ["C5", "E5", "G5", "A5", "C6"].forEach((n, i) =>
-        soft.triggerAttackRelease(n, "32n", at(i * 0.045), 0.24)
+        note(sfxBus, hz(n), at(i * 0.045), 0.07, 0.24, "sine", 0.01, 0.2)
       );
     },
 
     gameOver() {
-      if (disposed) return;
       step = 0;
       modeStack = [];
       applyMode();
-      musicBus.volume.rampTo(-30, 0.5);
+      musicBus.gain.setTargetAtTime(db(-30), ctx.currentTime, 0.25);
       ["C5", "A4", "F4", "E4"].forEach((n, i) =>
-        soft.triggerAttackRelease(n, "8n", at(0.1 + i * 0.16), 0.5)
+        note(sfxBus, hz(n), at(0.1 + i * 0.16), 0.18, 0.5, "sine", 0.02, 0.3)
       );
+      clearTimeout(menuTimer);
       menuTimer = setTimeout(() => {
         if (!disposed) api.menuMusic();
       }, 1200);
     },
 
     menuMusic() {
-      if (disposed) return;
       modeStack = ["menu"];
       applyMode();
-      if (transport.state !== "started") transport.start("+0.1");
+      startSeq();
     },
 
     startMusic() {
-      if (disposed) return;
       clearTimeout(menuTimer);
       modeStack = [];
       applyMode();
-      if (transport.state !== "started") transport.start("+0.1");
+      startSeq();
     },
 
     async setFocused(focused) {
       if (disposed) return;
-      const raw = Tone.getContext().rawContext;
       try {
         if (!focused) {
-          transport.pause();
-          if (raw.state === "running") await raw.suspend();
+          stopSeq();
+          if (ctx.state === "running") await ctx.suspend();
         } else {
-          if (raw.state === "suspended") await raw.resume();
-          if (transport.state === "paused") transport.start();
+          if (ctx.state === "suspended") await ctx.resume();
+          startSeq();
         }
       } catch {}
     },
@@ -434,25 +471,27 @@ export async function createAudio(rawContext) {
     async resume() {
       if (disposed) return;
       try {
-        const raw = Tone.getContext().rawContext;
-        if (raw.state === "suspended") await raw.resume();
+        if (ctx.state === "suspended") await ctx.resume();
       } catch {}
     },
 
-    setMuted(muted) {
-      if (disposed) return;
-      master.mute = !!muted;
+    setMuted(next) {
+      muted = !!next;
+      master.gain.setTargetAtTime(muted ? 0.0001 : db(-3), ctx.currentTime, 0.02);
     },
 
     dispose() {
       disposed = true;
       clearTimeout(menuTimer);
+      stopSeq();
+      droneOn(false);
       try {
-        transport.stop();
-        transport.cancel();
-        seq.dispose();
-        [pluck, soft, body, comp, bass, drone, musicBus, musicFilter, sfxBus,
-         sfxFilter, master].forEach((n) => n.dispose());
+        master.disconnect();
+        sfxBus.disconnect();
+        sfxFilter.disconnect();
+        musicBus.disconnect();
+        musicFilter.disconnect();
+        ctx.close();
       } catch {}
     },
   };

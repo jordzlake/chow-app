@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import logo from "@/public/logo.png";
-import { createAudio, preloadAudio } from "./audio";
+import { createAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
    the pool, so the drop mix widens as the run goes rather than all at once.
@@ -1786,10 +1786,8 @@ export default function GamePage() {
 
   const buildAudio = useCallback(async (rawContext) => {
     try {
-      const audio = await Promise.race([
-        createAudio(rawContext),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 8000)),
-      ]);
+      const audio = await createAudio(rawContext);
+      if (!audio) return null;
       audioRef.current = audio;
       audio.setMuted(mutedRef.current);
       return audio;
@@ -1821,18 +1819,10 @@ export default function GamePage() {
   // The context itself is built on the first real interaction, because that is
   // what a browser requires before it will let anything through. By then the
   // module is already in memory, so there is no wait.
+  // There is no module to download now, so the first touch is all it takes:
+  // the context is built synchronously in the handler and the menu bed starts
+  // immediately.
   useEffect(() => {
-    // Fetching Tone during the initial paint was what made the page feel slow
-    // to load. It waits for an idle moment instead, and is almost always ready
-    // long before anyone presses Start.
-    let idle = null;
-    const kick = () => preloadAudio().catch(() => {});
-    if (typeof window.requestIdleCallback === "function") {
-      idle = window.requestIdleCallback(kick, { timeout: 3000 });
-    } else {
-      idle = window.setTimeout(kick, 1200);
-    }
-
     let started = false;
     const onFirstTouch = () => {
       if (started) return;
@@ -1847,11 +1837,6 @@ export default function GamePage() {
     window.addEventListener("keydown", onFirstTouch);
     window.addEventListener("pointerdown", nudge);
     return () => {
-      if (typeof window.cancelIdleCallback === "function") {
-        window.cancelIdleCallback(idle);
-      } else {
-        window.clearTimeout(idle);
-      }
       window.removeEventListener("pointerdown", onFirstTouch);
       window.removeEventListener("keydown", onFirstTouch);
       window.removeEventListener("pointerdown", nudge);
