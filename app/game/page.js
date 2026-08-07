@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
+import logo from "@/public/logo.png";
 import { createAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
@@ -429,8 +431,12 @@ export default function GamePage() {
         if (wasUp && g.fx[key] <= 0) endedKey = key;
       }
       // Every power-up ends with a clean screen, so the run never resumes
-      // with a backlog already halfway down.
-      if (endedKey) sweep(endedKey);
+      // with a backlog already halfway down. The bed reverts at the same
+      // moment, so the music tracks the timer exactly.
+      if (endedKey) {
+        audioRef.current?.powerDown(endedKey);
+        sweep(endedKey);
+      }
 
       // sky steps every SKY_STEP points, then eases toward the new hue
       const step = Math.min(SKY_END / SKY_STEP, Math.floor(g.score / SKY_STEP));
@@ -551,7 +557,7 @@ export default function GamePage() {
               }
             } else {
               g.fx[f.power] = spec.seconds; // refreshes rather than stacks
-              audioRef.current?.power();
+              audioRef.current?.powerUp(f.power);
               pop(f.x, rimY - 14, spec.label, spec.color, 19);
             }
           } else if (f.kind === "bonus") {
@@ -666,7 +672,7 @@ export default function GamePage() {
     };
 
     const end = () => {
-      audioRef.current?.duckMusic();
+      audioRef.current?.gameOver();
       g.phase = "over";
       g.dragging = false;
       for (const key of TIMED_KEYS) g.fx[key] = 0;
@@ -1278,14 +1284,32 @@ export default function GamePage() {
     window.addEventListener("resize", onResize);
     window.addEventListener("orientationchange", onResize);
 
+    // Sound follows focus. visibilitychange covers tab switches and the phone
+    // locking; blur/focus covers clicking away to another desktop window,
+    // which does not fire visibilitychange.
     const onHide = () => {
-      if (document.hidden && g.phase === "playing") {
+      const hidden = document.hidden;
+      audioRef.current?.setFocused(!hidden);
+      if (hidden && g.phase === "playing") {
         g.dragging = false;
         g.phase = "paused";
         setPhase("paused");
       }
     };
+    const onBlur = () => {
+      audioRef.current?.setFocused(false);
+      if (g.phase === "playing") {
+        g.dragging = false;
+        g.phase = "paused";
+        setPhase("paused");
+      }
+    };
+    const onFocus = () => {
+      if (!document.hidden) audioRef.current?.setFocused(true);
+    };
     document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
 
     return () => {
       audioRef.current?.dispose();
@@ -1294,6 +1318,8 @@ export default function GamePage() {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("orientationchange", onResize);
       document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
       wrap.removeEventListener("pointerdown", onDown);
       wrap.removeEventListener("pointermove", onMove);
       wrap.removeEventListener("pointerup", onUp);
@@ -1386,6 +1412,7 @@ export default function GamePage() {
   const resume = useCallback(() => {
     const g = gameRef.current;
     if (!g) return;
+    audioRef.current?.setFocused(true);
     g.last = performance.now();
     g.phase = "playing";
     setPhase("playing");
@@ -1493,7 +1520,13 @@ export default function GamePage() {
       {phase === "ready" && (
         <div className="veil">
           <div className="panel">
-            <h1 className="panel__title">Catch the Citrus</h1>
+            <Image
+              src={logo}
+              alt="Chow Master"
+              className="panel__logo"
+              sizes="260px"
+              priority
+            />
             <p className="panel__text">
               Drag anywhere to slide the bowl. New fruit joins as your score
               climbs, and the smaller it is the more it pays.
@@ -1645,6 +1678,12 @@ export default function GamePage() {
           <div className="panel">
             {boardOpen ? (
               <>
+                <Image
+                  src={logo}
+                  alt="Chow Master"
+                  className="panel__logo panel__logo--sm"
+                  sizes="150px"
+                />
                 <h1 className="panel__title">Top 10</h1>
                 {board === null ? (
                   <p className="panel__text">Loading the board...</p>
@@ -1675,6 +1714,12 @@ export default function GamePage() {
               </>
             ) : (
               <>
+                <Image
+                  src={logo}
+                  alt="Chow Master"
+                  className="panel__logo panel__logo--sm"
+                  sizes="150px"
+                />
                 <h1 className="panel__title">Bowl Empty</h1>
                 <p className="panel__score">{score}</p>
                 <p className="panel__text">

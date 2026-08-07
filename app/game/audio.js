@@ -1,13 +1,16 @@
 "use client";
 
 /*
-  Audio is loaded lazily. Tone.js is ~78 KB gzipped, which is more than the rest
-  of the game put together, so it is dynamically imported the moment the player
-  presses Start rather than on page load. Everything here is synthesised, so
-  there are no audio files to fetch and nothing to 404.
+  All audio is synthesised with Tone.js — no files to fetch, nothing to 404.
+  Tone is ~78 KB gzipped so it is dynamically imported on Start, behind the
+  loading screen, rather than at page load.
 
-  All of it is deliberately quiet and soft-edged: triangle and sine waves, no
-  attack transients, a low-pass on every bus and a shared reverb.
+  The bed is bossa nova: a syncopated comping figure over a two-feel bass with
+  a soft rim playing the 3-2 bossa clave, on lazy major-seventh changes. Each
+  timed power-up swaps the bed to its own mode and swaps back when it lapses.
+
+  Everything is low and soft-edged: triangle and sine voices, no sharp attacks,
+  a low-pass on every bus and one shared reverb.
 */
 
 // C major pentatonic. Every catch walks one step up, so a clean run plays a
@@ -19,20 +22,52 @@ const SCALE = [
 ];
 const WRAP_TO = 4; // once past the top, fall back here instead of going shrill
 
-// A lazy, loping two-bar figure. Nulls are rests, and there are plenty.
-const OSTINATO = [
-  "C5", null, "E5", null, "G5", null, "E5", null,
-  "A4", null, "C5", null, null, "G4", null, null,
-  "D5", null, "G5", null, "E5", null, null, null,
-  "C5", null, "A4", null, null, "E4", null, null,
-];
+// Lazy major-seventh changes. Four bars, one chord each.
+const PROGRESSIONS = {
+  base: {
+    chords: [
+      ["C4", "E4", "G4", "B4"], // Cmaj7
+      ["A3", "C4", "E4", "G4"], // Am7
+      ["D4", "F4", "A4", "C5"], // Dm7
+      ["G3", "B3", "D4", "F4"], // G7
+    ],
+    roots: ["C2", "A1", "D2", "G1"],
+  },
+  bright: {
+    chords: [
+      ["D4", "F#4", "A4", "C#5"], // Dmaj7
+      ["B3", "D4", "F#4", "A4"], // Bm7
+      ["E4", "G4", "B4", "D5"], // Em7
+      ["A3", "C#4", "E4", "G4"], // A7
+    ],
+    roots: ["D2", "B1", "E2", "A1"],
+  },
+  dream: {
+    chords: [
+      ["F3", "A3", "C4", "E4"], // Fmaj7
+      ["D3", "F3", "A3", "C4"], // Dm7
+      ["G3", "B3", "D4", "F4"], // G7
+      ["C4", "E4", "G4", "B4"], // Cmaj7
+    ],
+    roots: ["F2", "D2", "G1", "C2"],
+  },
+};
 
-const PADS = [
-  ["C3", "E3", "G3"],
-  ["A2", "C3", "E3"],
-  ["F2", "A2", "C3"],
-  ["G2", "B2", "D3"],
-];
+// How the bed reacts to each power-up.
+const MODES = {
+  base: { bpm: 128, filter: 2200, prog: "base", drone: false },
+  mango: { bpm: 142, filter: 4200, prog: "bright", drone: false },
+  shield: { bpm: 122, filter: 1500, prog: "base", drone: true },
+  bowl: { bpm: 100, filter: 2800, prog: "dream", drone: false },
+};
+
+// Four notes on pickup, one shape per power-up.
+const MOTIFS = {
+  mango: ["C5", "E5", "G5", "C6"],
+  shield: ["E4", "B4", "E5", "G#5"],
+  bowl: ["A4", "C5", "E5", "A5"],
+  health: ["G4", "B4", "D5", "G5"],
+};
 
 export async function createAudio(rawContext) {
   const Tone = await import("tone");
@@ -41,6 +76,9 @@ export async function createAudio(rawContext) {
   // the user gesture it needs. Handing it to Tone keeps that permission.
   if (rawContext) Tone.setContext(rawContext);
   await Tone.start();
+
+  const transport = Tone.getTransport();
+  transport.bpm.value = MODES.base.bpm;
 
   const limiter = new Tone.Limiter(-6).toDestination();
   const master = new Tone.Volume(-3).connect(limiter);
@@ -55,11 +93,12 @@ export async function createAudio(rawContext) {
   sfxFilter.connect(reverb);
 
   const musicBus = new Tone.Volume(-26);
-  const musicFilter = new Tone.Filter(2200, "lowpass");
+  const musicFilter = new Tone.Filter(MODES.base.filter, "lowpass");
   musicBus.connect(musicFilter);
   musicFilter.connect(reverb);
 
-  // voices
+  /* ---------------------------------------------------------------- sfx */
+
   const pluck = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: "triangle" },
     envelope: { attack: 0.005, decay: 0.28, sustain: 0, release: 0.35 },
@@ -72,6 +111,13 @@ export async function createAudio(rawContext) {
   }).connect(sfxBus);
   soft.volume.value = -8;
 
+  // for rising and falling sweeps
+  const laser = new Tone.Synth({
+    oscillator: { type: "sine" },
+    envelope: { attack: 0.006, decay: 0.3, sustain: 0.15, release: 0.12 },
+  }).connect(sfxBus);
+  laser.volume.value = -16;
+
   const thud = new Tone.NoiseSynth({
     noise: { type: "brown" },
     envelope: { attack: 0.005, decay: 0.16, sustain: 0 },
@@ -81,24 +127,76 @@ export async function createAudio(rawContext) {
   thudFilter.connect(sfxBus);
   thud.volume.value = -26;
 
-  const marimba = new Tone.PolySynth(Tone.Synth, {
+  /* -------------------------------------------------------------- music */
+
+  const comp = new Tone.PolySynth(Tone.Synth, {
     oscillator: { type: "triangle" },
-    envelope: { attack: 0.008, decay: 0.5, sustain: 0, release: 0.6 },
+    envelope: { attack: 0.012, decay: 0.9, sustain: 0.04, release: 0.7 },
   }).connect(musicBus);
+  comp.volume.value = -9;
 
-  const pad = new Tone.PolySynth(Tone.Synth, {
+  const bass = new Tone.Synth({
     oscillator: { type: "sine" },
-    envelope: { attack: 1.4, decay: 0.6, sustain: 0.35, release: 2.4 },
+    envelope: { attack: 0.02, decay: 0.5, sustain: 0.2, release: 0.5 },
   }).connect(musicBus);
-  pad.volume.value = -12;
+  bass.volume.value = -6;
 
-  // background bed. Tone.Transport is deprecated in v15, so go through
-  // getTransport() instead.
-  const transport = Tone.getTransport();
-  transport.bpm.value = 84;
+  const rim = new Tone.NoiseSynth({
+    noise: { type: "white" },
+    envelope: { attack: 0.001, decay: 0.03, sustain: 0 },
+  });
+  const rimFilter = new Tone.Filter(2400, "highpass");
+  rim.connect(rimFilter);
+  rimFilter.connect(musicBus);
+  rim.volume.value = -30;
 
-  // Tone throws if two notes are scheduled at the exact same instant, which is
-  // easy to hit when two fruit land on one frame. This keeps times increasing.
+  const drone = new Tone.PolySynth(Tone.Synth, {
+    oscillator: { type: "sine" },
+    envelope: { attack: 1.6, decay: 0.4, sustain: 0.6, release: 2.6 },
+  }).connect(musicBus);
+  drone.volume.value = -20;
+
+  let prog = PROGRESSIONS.base;
+
+  // Bossa comping: bar one syncopates on the and-of-two, bar two pushes
+  // earlier. The rim carries the 3-2 clave across the same two bars.
+  const COMP_A = [0, 3, 6];
+  const COMP_B = [0, 2, 5];
+  const CLAVE_A = [0, 3, 6];
+  const CLAVE_B = [2, 5];
+  const BASS_HITS = [0, 4]; // two-feel: root on one, fifth on three
+
+  // four bars of eighths, one chord per bar
+  const EVENTS = [];
+  for (let bar = 0; bar < 4; bar++) {
+    for (let e = 0; e < 8; e++) EVENTS.push({ bar, e });
+  }
+
+  const seq = new Tone.Sequence(
+    (time, v) => {
+      const chord = prog.chords[v.bar];
+      const root = prog.roots[v.bar];
+      const odd = v.bar % 2 === 1;
+
+      if ((odd ? COMP_B : COMP_A).includes(v.e)) {
+        comp.triggerAttackRelease(chord, "8n", time, 0.16);
+      }
+      if (BASS_HITS.includes(v.e)) {
+        bass.triggerAttackRelease(root, v.e === 0 ? "4n" : "8n", time, 0.3);
+      }
+      if ((odd ? CLAVE_B : CLAVE_A).includes(v.e)) {
+        rim.triggerAttackRelease("32n", time, 0.22);
+      }
+    },
+    EVENTS,
+    "8n"
+  );
+  seq.start(0);
+
+  /* ---------------------------------------------------------- scheduling */
+
+  // Tone throws if two notes land on the exact same instant, which is easy to
+  // hit when two fruit are caught on one frame. This keeps times increasing.
   let lastAt = 0;
   const at = (offset) => {
     const now = Tone.now() + (offset || 0);
@@ -108,6 +206,24 @@ export async function createAudio(rawContext) {
 
   let step = 0;
   let disposed = false;
+  let modeStack = [];
+  let droneOn = false;
+
+  const applyMode = () => {
+    const key = modeStack.length ? modeStack[modeStack.length - 1] : "base";
+    const cfg = MODES[key] || MODES.base;
+    transport.bpm.rampTo(cfg.bpm, 1.1);
+    musicFilter.frequency.rampTo(cfg.filter, 0.7);
+    prog = PROGRESSIONS[cfg.prog];
+
+    if (cfg.drone && !droneOn) {
+      droneOn = true;
+      drone.triggerAttack(["C3", "G3"], at());
+    } else if (!cfg.drone && droneOn) {
+      droneOn = false;
+      drone.releaseAll(at());
+    }
+  };
 
   const api = {
     catchFruit() {
@@ -117,29 +233,48 @@ export async function createAudio(rawContext) {
       step = step + 1 >= SCALE.length ? WRAP_TO : step + 1;
     },
 
-    // A run of catches builds the phrase; losing one drops you back down.
     resetPhrase() {
       step = 0;
     },
 
-    power() {
+    // Four notes up, then the bed changes character for as long as it runs.
+    powerUp(key) {
       if (disposed) return;
-      ["C5", "E5", "G5"].forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "16n", at(i * 0.06), 0.45)
+      const motif = MOTIFS[key] || MOTIFS.mango;
+      motif.forEach((n, i) =>
+        pluck.triggerAttackRelease(n, "16n", at(i * 0.075), 0.45)
       );
+      if (MODES[key]) {
+        modeStack = modeStack.filter((k) => k !== key).concat(key);
+        applyMode();
+      }
     },
 
-    bonus() {
+    // Timer lapsed: hand the bed back to whatever else is still running.
+    powerDown(key) {
       if (disposed) return;
-      ["G5", "A5", "C6", "E6"].forEach((n, i) =>
-        pluck.triggerAttackRelease(n, "32n", at(i * 0.045), 0.4)
-      );
+      modeStack = modeStack.filter((k) => k !== key);
+      applyMode();
+      soft.triggerAttackRelease("G3", "16n", at(), 0.2);
     },
 
     heal() {
       if (disposed) return;
-      soft.triggerAttackRelease("G4", "8n", at(), 0.4);
-      soft.triggerAttackRelease("C5", "4n", at(0.1), 0.4);
+      MOTIFS.health.forEach((n, i) =>
+        soft.triggerAttackRelease(n, "8n", at(i * 0.09), 0.4)
+      );
+    },
+
+    // The pineapple falls fast, so it gets a rising sweep on top of the run.
+    bonus() {
+      if (disposed) return;
+      const t = at();
+      laser.triggerAttack("C5", t);
+      laser.frequency.exponentialRampTo("C7", 0.26, t);
+      laser.triggerRelease(t + 0.3);
+      ["G5", "A5", "C6", "E6"].forEach((n, i) =>
+        pluck.triggerAttackRelease(n, "32n", at(i * 0.05), 0.4)
+      );
     },
 
     block() {
@@ -159,35 +294,63 @@ export async function createAudio(rawContext) {
       if (disposed) return;
       step = 0;
       thud.triggerAttackRelease("8n", at(), 0.5);
-      soft.triggerAttackRelease("F2", "8n", at(0.02), 0.3);
+      // a flat second underneath, which is what makes it read as a mistake
+      soft.triggerAttackRelease("F2", "8n", at(0.02), 0.32);
+      soft.triggerAttackRelease("Gb2", "8n", at(0.03), 0.24);
     },
 
     scorpion() {
       if (disposed) return;
       step = 0;
       thud.triggerAttackRelease("4n", at(), 0.6);
-      ["F3", "D3", "A2"].forEach((n, i) =>
-        soft.triggerAttackRelease(n, "8n", at(i * 0.13), 0.35)
+      const t = at();
+      laser.triggerAttack("A3", t);
+      laser.frequency.exponentialRampTo("A1", 0.5, t);
+      laser.triggerRelease(t + 0.55);
+    },
+
+    // Rising run as the board wipes.
+    sweep() {
+      if (disposed) return;
+      ["C5", "E5", "G5", "A5", "C6"].forEach((n, i) =>
+        soft.triggerAttackRelease(n, "32n", at(i * 0.045), 0.24)
       );
     },
 
-    sweep() {
+    // Losing screen: the bed drops away and a soft minor cadence lands.
+    gameOver() {
       if (disposed) return;
-      ["C5", "G4", "E4"].forEach((n, i) =>
-        soft.triggerAttackRelease(n, "16n", at(i * 0.05), 0.22)
+      step = 0;
+      modeStack = [];
+      applyMode();
+      musicBus.volume.rampTo(-44, 1.4);
+      ["G4", "E4", "C4", "A3"].forEach((n, i) =>
+        soft.triggerAttackRelease(n, "8n", at(0.1 + i * 0.16), 0.34)
       );
     },
 
     startMusic() {
       if (disposed) return;
+      modeStack = [];
+      applyMode();
       musicBus.volume.rampTo(-26, 1.2);
       if (transport.state !== "started") transport.start("+0.1");
     },
 
-    // Not stopped outright between runs, just pulled back, so menus stay calm.
-    duckMusic() {
+    // Called when the tab or window loses focus. Suspending the context stops
+    // every voice at once and gives the CPU back.
+    async setFocused(focused) {
       if (disposed) return;
-      musicBus.volume.rampTo(-38, 0.8);
+      const raw = Tone.getContext().rawContext;
+      try {
+        if (!focused) {
+          transport.pause();
+          if (raw.state === "running") await raw.suspend();
+        } else {
+          if (raw.state === "suspended") await raw.resume();
+          if (transport.state === "paused") transport.start();
+        }
+      } catch {}
     },
 
     setMuted(muted) {
@@ -201,28 +364,12 @@ export async function createAudio(rawContext) {
         transport.stop();
         transport.cancel();
         seq.dispose();
-        padLoop.dispose();
-        [pluck, soft, thud, thudFilter, marimba, pad, musicBus, musicFilter,
-         sfxBus, sfxFilter, reverb, master, limiter].forEach((n) => n.dispose());
+        [pluck, soft, laser, thud, thudFilter, comp, bass, rim, rimFilter,
+         drone, musicBus, musicFilter, sfxBus, sfxFilter, reverb, master,
+         limiter].forEach((n) => n.dispose());
       } catch {}
     },
   };
-
-  const seq = new Tone.Sequence(
-    (time, note) => {
-      if (note) marimba.triggerAttackRelease(note, "8n", time, 0.32);
-    },
-    OSTINATO,
-    "8n"
-  );
-  seq.start(0);
-
-  let padIndex = 0;
-  const padLoop = new Tone.Loop((time) => {
-    pad.triggerAttackRelease(PADS[padIndex % PADS.length], "1m", time, 0.22);
-    padIndex += 1;
-  }, "1m");
-  padLoop.start(0);
 
   return api;
 }

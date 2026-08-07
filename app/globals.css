@@ -657,3 +657,20 @@ input {
   color: rgba(255, 248, 230, 0.5);
   border-color: rgba(255, 248, 230, 0.25);
 }
+
+/* Chow Master logo, front and score screens only */
+
+.panel__logo {
+  display: block;
+  width: 84%;
+  max-width: 260px;
+  height: auto;
+  margin: 0 auto 12px;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35));
+}
+
+.panel__logo--sm {
+  width: 58%;
+  max-width: 152px;
+  margin-bottom: 8px;
+}
