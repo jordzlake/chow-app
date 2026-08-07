@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import logo from "@/public/logo.png";
-import { createAudio } from "./audio";
+import { createAudio, preloadAudio } from "./audio";
 
 /* Smaller fruit is worth more. `unlock` is the score at which that size joins
    the pool, so the drop mix widens as the run goes rather than all at once.
@@ -1801,21 +1801,32 @@ export default function GamePage() {
   // Opening the instructions is a real click, which is all a browser needs to
   // allow audio. So the menu bed can start while the player reads, instead of
   // the front screen sitting in silence until the first run.
-  // Start the audio as soon as the page is up, so the opening menu has music
-  // without waiting for anything. The listener afterwards is only a safety net
-  // for a browser that holds the context suspended; if sound is already
-  // playing it does nothing at all.
+  // Tone is a large module, so it is fetched as soon as the page mounts. That
+  // is only the download: no AudioContext is created, and nothing plays.
+  //
+  // The context itself is built on the first real interaction, because that is
+  // what a browser requires before it will let anything through. By then the
+  // module is already in memory, so there is no wait.
   useEffect(() => {
-    initAudio().then((audio) => {
-      if (audio && gameRef.current?.phase !== "playing") audio.menuMusic();
-    });
+    preloadAudio().catch(() => {});
 
+    let started = false;
+    const onFirstTouch = () => {
+      if (started) return;
+      started = true;
+      initAudio().then((audio) => {
+        if (audio && gameRef.current?.phase !== "playing") audio.menuMusic();
+      });
+    };
     const nudge = () => audioRef.current?.resume();
+
+    window.addEventListener("pointerdown", onFirstTouch);
+    window.addEventListener("keydown", onFirstTouch);
     window.addEventListener("pointerdown", nudge);
-    window.addEventListener("keydown", nudge);
     return () => {
+      window.removeEventListener("pointerdown", onFirstTouch);
+      window.removeEventListener("keydown", onFirstTouch);
       window.removeEventListener("pointerdown", nudge);
-      window.removeEventListener("keydown", nudge);
     };
   }, [initAudio]);
 
