@@ -21,8 +21,10 @@
 
   Two further rules about scheduling:
 
-  4. Everything is scheduled 50 ms ahead, per Tone's own guidance that values
-     under 0.1 s are imperceptible but meaningfully reduce pops.
+  4. Events are scheduled a short way ahead so they never land on the edge of
+     the current render quantum, but the total delay is kept near 60 ms. A big
+     output buffer stops underruns but is heard as lag, which matters in a game
+     where a sound answers a touch.
 
   5. Nothing monophonic is ever retriggered while it is still sounding. Pitch
      sweeps build a throwaway oscillator each time instead of sharing one voice,
@@ -111,13 +113,27 @@ export function preloadAudio() {
   return tonePromise;
 }
 
-export async function createAudio() {
+/*
+  `rawContext` must be an AudioContext that the page created synchronously
+  inside a real click or touch handler. That is the only reliable way to get
+  audio permission: creating it after an await, even an await that resolves
+  from cache, can happen outside the gesture and leaves the context suspended.
+*/
+export async function createAudio(rawContext) {
   const Tone = await preloadAudio();
 
-  // The largest buffer the browser will give us. A small buffer underruns
-  // under canvas load, and an underrun is heard as a pop.
-  const context = new Tone.Context({ latencyHint: "playback", lookAhead: 0.1 });
-  Tone.setContext(context);
+  if (rawContext) {
+    Tone.setContext(rawContext);
+  } else {
+    Tone.setContext(new Tone.Context({ latencyHint: "interactive" }));
+  }
+
+  // Delay budget, kept deliberately tight now that the graph is cheap. The
+  // "playback" latency hint I used before asks Chrome for a buffer up to
+  // ~200 ms, which on top of lookAhead and lead put a third of a second
+  // between catching a fruit and hearing it.
+  Tone.getContext().lookAhead = 0.03;
+
   await Tone.start();
 
   const transport = Tone.getTransport();
@@ -184,7 +200,9 @@ export async function createAudio() {
 
   /* --------------------------------------------------------- scheduling */
 
-  const LEAD = 0.05; // Tone's own guidance for avoiding performance pops
+  // 30 ms is enough to keep events off the edge of the current render quantum
+  // without the sound trailing the catch. With lookAhead that totals ~60 ms.
+  const LEAD = 0.03;
   let lastAt = 0;
   const at = (offset) => {
     const now = Tone.now() + LEAD + (offset || 0);

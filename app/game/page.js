@@ -1763,17 +1763,31 @@ export default function GamePage() {
   // Started from a real click so the AudioContext is created with a user
   // gesture in hand. Tone is imported behind the loading screen; if it fails
   // or takes too long, play begins silently rather than blocking the game.
+  // Called from inside a click or touch handler. The AudioContext is built
+  // here, synchronously, before any await: that is what carries the user
+  // gesture. Doing it after awaiting the Tone import was why the first launch
+  // was silent.
   const initAudio = useCallback(() => {
     if (audioRef.current) return Promise.resolve(audioRef.current);
     if (audioPromiseRef.current) return audioPromiseRef.current;
-    audioPromiseRef.current = buildAudio();
+
+    let raw = null;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) {
+        raw = new Ctx({ latencyHint: "interactive" });
+        raw.resume();
+      }
+    } catch {}
+
+    audioPromiseRef.current = buildAudio(raw);
     return audioPromiseRef.current;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const buildAudio = useCallback(async () => {
+  const buildAudio = useCallback(async (rawContext) => {
     try {
       const audio = await Promise.race([
-        createAudio(),
+        createAudio(rawContext),
         new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 8000)),
       ]);
       audioRef.current = audio;
@@ -1808,7 +1822,16 @@ export default function GamePage() {
   // what a browser requires before it will let anything through. By then the
   // module is already in memory, so there is no wait.
   useEffect(() => {
-    preloadAudio().catch(() => {});
+    // Fetching Tone during the initial paint was what made the page feel slow
+    // to load. It waits for an idle moment instead, and is almost always ready
+    // long before anyone presses Start.
+    let idle = null;
+    const kick = () => preloadAudio().catch(() => {});
+    if (typeof window.requestIdleCallback === "function") {
+      idle = window.requestIdleCallback(kick, { timeout: 3000 });
+    } else {
+      idle = window.setTimeout(kick, 1200);
+    }
 
     let started = false;
     const onFirstTouch = () => {
@@ -1824,6 +1847,11 @@ export default function GamePage() {
     window.addEventListener("keydown", onFirstTouch);
     window.addEventListener("pointerdown", nudge);
     return () => {
+      if (typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idle);
+      } else {
+        window.clearTimeout(idle);
+      }
       window.removeEventListener("pointerdown", onFirstTouch);
       window.removeEventListener("keydown", onFirstTouch);
       window.removeEventListener("pointerdown", nudge);
