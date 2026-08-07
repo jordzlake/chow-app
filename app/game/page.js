@@ -507,11 +507,13 @@ export default function GamePage() {
       if (g.fx.shield > 0) {
         audioRef.current?.block();
         burst(x, y, POWERS.shield.color);
-        if (cause === "pepper") {
-          // Blocking a pepper is a small win, so it pays.
-          g.score += 25;
+        if (cause === "pepper" || cause === "scorpion") {
+          // Blocking a pepper is a small win, so it pays. Stopping a scorpion
+          // saves the whole run, so it pays double.
+          const paid = cause === "scorpion" ? 50 : 25;
+          g.score += paid;
           g.scoreDirty = true;
-          pop(x, y, "Blocked +25", POWERS.shield.color, 17);
+          pop(x, y, `Blocked +${paid}`, POWERS.shield.color, 17);
         } else {
           pop(x, y, "Blocked", POWERS.shield.color, 16);
         }
@@ -519,7 +521,7 @@ export default function GamePage() {
       }
       audioRef.current?.miss();
       // A pepper is the only thing that costs a fork, and only when it lands.
-      if (cause === "pepper" && g.forks.length > 0) {
+      if ((cause === "pepper" || cause === "scorpion") && g.forks.length > 0) {
         const lost = forkSpot(g.forks.length - 1);
         g.forks.pop();
         burst(lost.x, lost.y, "#c98b2a");
@@ -724,13 +726,20 @@ export default function GamePage() {
             ring(f.x, rimY, "#ffd400", 0.2);
             pop(f.x, rimY - 16, `+${f.points}`, "#ffe14d", 26);
           } else if (f.kind === "pepper") {
+            const cause = f.scorpion ? "scorpion" : "pepper";
+
             if (g.fx.mango > 0) {
-              // Catch all is a fire of its own; peppers burn up harmlessly.
+              // Catch all is a fire of its own, so peppers burn up and pay out.
+              const paid = f.scorpion ? 10 : 5;
+              g.score += paid;
+              g.scoreDirty = true;
               audioRef.current?.block();
-              burst(f.x, rimY, "#ffb020");
-              pop(f.x, rimY - 12, "Burned up", "#ffd84d", 17);
+              burst(f.x, rimY, f.scorpion ? "#ff7a1e" : "#ffb020");
+              pop(f.x, rimY - 12, `Burned +${paid}`, "#ffd84d", 17);
+            } else if (g.fx.shield > 0) {
+              // The shield covers every pepper, scorpions included.
+              loseLife(f.x, rimY, cause);
             } else if (f.scorpion) {
-              // Nothing survives a scorpion. Shield does not cover this.
               audioRef.current?.scorpion();
               burst(f.x, rimY, "#ff2424");
               ring(f.x, rimY, "#ff2424", 0);
@@ -743,7 +752,7 @@ export default function GamePage() {
             } else {
               audioRef.current?.pepper();
               burst(f.x, rimY, "#e02020");
-              loseLife(f.x, rimY, "pepper");
+              loseLife(f.x, rimY, cause);
             }
           } else {
             audioRef.current?.catchFruit();
@@ -906,10 +915,15 @@ export default function GamePage() {
       const key = Math.round(g.hue * 2) + ":" + Math.round(g.h);
       if (key !== g.skyKey) {
         const h = g.hue;
+        // The far end of the journey is yellow, and pale yellow behind yellow
+        // fruit is the worst case for reading the board. So the sky darkens and
+        // desaturates as it travels, keeping the same hues but giving the fruit
+        // something to sit against.
+        const t = Math.max(0, Math.min(1, (h - SKY_FROM) / SKY_SPAN));
         const grad = ctx.createLinearGradient(0, 0, 0, g.h);
-        grad.addColorStop(0, `hsl(${h}, 74%, 73%)`);
-        grad.addColorStop(0.52, `hsl(${h + 10}, 78%, 63%)`);
-        grad.addColorStop(1, `hsl(${h + 42}, 55%, 48%)`);
+        grad.addColorStop(0, `hsl(${h}, ${74 - 16 * t}%, ${73 - 15 * t}%)`);
+        grad.addColorStop(0.52, `hsl(${h + 10}, ${78 - 16 * t}%, ${63 - 13 * t}%)`);
+        grad.addColorStop(1, `hsl(${h + 42}, ${55 - 8 * t}%, ${48 - 8 * t}%)`);
         g.skyGrad = grad;
         g.skyKey = key;
       }
@@ -948,11 +962,19 @@ export default function GamePage() {
       ctx.globalAlpha = 1;
     };
 
+    // A dark edge on every fruit. Cheap, and it is what stops a yellow lemon
+    // disappearing into a yellow sky.
+    const RIM = "rgba(64,34,6,0.45)";
+    const rimWidth = (r) => Math.max(1.6, r * 0.085);
+
     const drawCitrus = (f) => {
       ctx.fillStyle = f.skin;
       ctx.beginPath();
       ctx.arc(0, f.r * 0.08, f.r, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(f.r);
+      ctx.stroke();
 
       ctx.fillStyle = f.flesh;
       ctx.beginPath();
@@ -976,6 +998,9 @@ export default function GamePage() {
       ctx.beginPath();
       ctx.ellipse(0, 0, r * 0.44, r * 1.05, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(r);
+      ctx.stroke();
       ctx.fillStyle = f.flesh;
       ctx.beginPath();
       ctx.ellipse(0, 0, r * 0.37, r * 0.98, 0, 0, Math.PI * 2);
@@ -1008,8 +1033,14 @@ export default function GamePage() {
       ctx.fillStyle = f.skin;
       ctx.beginPath();
       ctx.arc(-r * 0.32, r * 0.06, r * 0.72, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(r);
+      ctx.stroke();
+      ctx.beginPath();
       ctx.arc(r * 0.32, r * 0.06, r * 0.72, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
       ctx.fillStyle = f.flesh;
       ctx.beginPath();
       ctx.arc(-r * 0.3, r * 0.02, r * 0.67, 0, Math.PI * 2);
@@ -1057,6 +1088,9 @@ export default function GamePage() {
         ctx.beginPath();
         ctx.arc(cx, cy, rad, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = RIM;
+        ctx.lineWidth = rimWidth(rad);
+        ctx.stroke();
         ctx.fillStyle = f.flesh;
         ctx.beginPath();
         ctx.arc(cx, cy - rad * 0.05, rad * 0.9, 0, Math.PI * 2);
@@ -1074,6 +1108,9 @@ export default function GamePage() {
       ctx.beginPath();
       ctx.ellipse(0, r * 0.06, r * 0.72, r * 0.98, 0.12, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(r);
+      ctx.stroke();
       ctx.fillStyle = f.flesh;
       ctx.beginPath();
       ctx.ellipse(0, 0, r * 0.68, r * 0.92, 0.12, 0, Math.PI * 2);
@@ -1110,6 +1147,10 @@ export default function GamePage() {
       ctx.fillStyle = f.skin;
       path(r, 0.44);
       ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(r);
+      ctx.lineJoin = "round";
+      ctx.stroke();
       ctx.fillStyle = f.flesh;
       path(r * 0.88, 0.46);
       ctx.fill();
@@ -1129,6 +1170,9 @@ export default function GamePage() {
       ctx.quadraticCurveTo(-r * 0.36, r * 0.66, -r * 0.34, -r * 1.0);
       ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = RIM;
+      ctx.lineWidth = rimWidth(r);
+      ctx.stroke();
       ctx.fillStyle = f.flesh;
       for (const t of [-0.62, -0.18, 0.28, 0.7]) {
         ctx.beginPath();
@@ -2041,8 +2085,10 @@ export default function GamePage() {
                 knocks one off. It never widens your bowl.
               </li>
               <li>
-                Blocking a pepper with the <b style={{ color: POWERS.shield.color }}>Shield</b>{" "}
-                pays 25.
+                The <b style={{ color: POWERS.shield.color }}>Shield</b> stops every
+                pepper, scorpions included — 25 for a burning one, 50 for a
+                scorpion. <b style={{ color: POWERS.mango.color }}>Catch all</b>{" "}
+                burns them instead, for 5 and 10.
               </li>
             </ul>
 
