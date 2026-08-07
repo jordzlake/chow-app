@@ -82,13 +82,35 @@ const MOTIFS = {
   health: ["G4", "B4", "D5", "G5"],
 };
 
-export async function createAudio(rawContext) {
+export async function createAudio() {
   const Tone = await import("tone");
 
-  // The native context was created inside the click handler, so it already has
-  // the user gesture it needs. Handing it to Tone keeps that permission.
-  if (rawContext) Tone.setContext(rawContext);
-  await Tone.start();
+  /*
+    The popping was never the shape of the notes. Tone issue #953 describes the
+    same symptom from triggering voices in quick succession, and the cause is
+    the audio thread missing its deadline: when the render quantum is not filled
+    in time the output drops out for a fraction of a buffer, which is heard as a
+    pop, and under sustained load as a dirty, compressed-sounding hash.
+
+    Two things were making that likely here. A hand-built AudioContext got the
+    browser default, which is the smallest, most underrun-prone buffer, and this
+    game is already running a full-screen canvas at 60fps beside it. So the
+    context is now created explicitly with the "playback" latency hint, which
+    asks for the largest, most forgiving buffer. The cost is on the order of
+    twenty milliseconds of extra latency, which is nothing next to the 100ms of
+    scheduling lookAhead already in play.
+  */
+  const context = new Tone.Context({
+    latencyHint: "playback",
+    lookAhead: 0.1,
+  });
+  Tone.setContext(context);
+
+  // Try to run immediately. If the browser holds it suspended, the resume
+  // fallback in the page will pick it up on the first interaction.
+  try {
+    await context.resume();
+  } catch {}
 
   const transport = Tone.getTransport();
   transport.bpm.value = MODES.base.bpm;
@@ -103,11 +125,16 @@ export async function createAudio(rawContext) {
   */
   const master = new Tone.Volume(-3).toDestination();
 
-  const reverb = new Tone.Reverb({ decay: 2.8, wet: 0.26 }).connect(master);
+  // Convolution reverb is by far the most expensive node here, and every voice
+  // runs through it. A shorter tail is dramatically cheaper per sample and is
+  // the difference between comfortable headroom on the audio thread and not.
+  const reverb = new Tone.Reverb({ decay: 1.3, wet: 0.2 }).connect(master);
   await reverb.ready;
 
   // buses
-  const sfxBus = new Tone.Volume(-9);
+  // The bed went up 16 dB over the last few rounds while this stayed put, so
+  // catches were fighting the music. Effects lead again.
+  const sfxBus = new Tone.Volume(-4);
   const sfxFilter = new Tone.Filter(3400, "lowpass");
   sfxBus.connect(sfxFilter);
   sfxFilter.connect(reverb);
@@ -433,6 +460,14 @@ export async function createAudio(rawContext) {
           if (raw.state === "suspended") await raw.resume();
           if (transport.state === "paused") transport.start();
         }
+      } catch {}
+    },
+
+    async resume() {
+      if (disposed) return;
+      try {
+        const raw = Tone.getContext().rawContext;
+        if (raw.state === "suspended") await raw.resume();
       } catch {}
     },
 

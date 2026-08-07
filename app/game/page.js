@@ -123,6 +123,8 @@ export default function GamePage() {
       fx: { mango: 0, shield: 0, bowl: 0 },
       lastPower: "mango",
       hue: SKY_FROM,
+      skyGrad: null,
+      skyKey: "",
       dragging: false,
       elapsed: 0,
       caught: 0,
@@ -171,6 +173,7 @@ export default function GamePage() {
       g.bowl.h = g.bowl.baseW * 0.4; // height stays put even when Catch all widens the bowl
       g.bowl.y = g.h - g.bowl.h - Math.max(56, g.h * 0.11);
       if (g.fx.mango <= 0) g.bowl.w = g.bowl.baseW;
+      g.skyKey = ""; // canvas resized, rebuild the cached gradient
       if (!g.bowl.x) {
         g.bowl.x = g.w / 2;
         g.bowl.target = g.w / 2;
@@ -897,12 +900,20 @@ export default function GamePage() {
     /* ----------------------------------------------------------- draw */
 
     const drawSky = () => {
-      const h = g.hue;
-      const grad = ctx.createLinearGradient(0, 0, 0, g.h);
-      grad.addColorStop(0, `hsl(${h}, 74%, 73%)`);
-      grad.addColorStop(0.52, `hsl(${h + 10}, 78%, 63%)`);
-      grad.addColorStop(1, `hsl(${h + 42}, 55%, 48%)`);
-      ctx.fillStyle = grad;
+      // Rebuilding a gradient 60 times a second allocates constantly and is
+      // main-thread work the audio scheduler has to compete with. The hue only
+      // moves in small steps, so one per half-degree is indistinguishable.
+      const key = Math.round(g.hue * 2) + ":" + Math.round(g.h);
+      if (key !== g.skyKey) {
+        const h = g.hue;
+        const grad = ctx.createLinearGradient(0, 0, 0, g.h);
+        grad.addColorStop(0, `hsl(${h}, 74%, 73%)`);
+        grad.addColorStop(0.52, `hsl(${h + 10}, 78%, 63%)`);
+        grad.addColorStop(1, `hsl(${h + 42}, 55%, 48%)`);
+        g.skyGrad = grad;
+        g.skyKey = key;
+      }
+      ctx.fillStyle = g.skyGrad;
       ctx.fillRect(0, 0, g.w, g.h);
 
       // drifting motes
@@ -1716,18 +1727,9 @@ export default function GamePage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const buildAudio = useCallback(async () => {
-    let raw = null;
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) {
-        raw = new Ctx();
-        if (raw.state === "suspended") raw.resume();
-      }
-    } catch {}
-
     try {
       const audio = await Promise.race([
-        createAudio(raw),
+        createAudio(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("slow")), 8000)),
       ]);
       audioRef.current = audio;
@@ -1746,6 +1748,7 @@ export default function GamePage() {
     }
     setBooting(true);
     const audio = await initAudio();
+    audio?.resume();
     audio?.startMusic();
     setBooting(false);
     start();
@@ -1754,23 +1757,21 @@ export default function GamePage() {
   // Opening the instructions is a real click, which is all a browser needs to
   // allow audio. So the menu bed can start while the player reads, instead of
   // the front screen sitting in silence until the first run.
-  // A browser will not let any sound play before the player has interacted, so
-  // the opening menu is silent until they touch the screen. This listens once
-  // for that first touch and brings the menu bed in then.
+  // Start the audio as soon as the page is up, so the opening menu has music
+  // without waiting for anything. The listener afterwards is only a safety net
+  // for a browser that holds the context suspended; if sound is already
+  // playing it does nothing at all.
   useEffect(() => {
-    let done = false;
-    const warm = () => {
-      if (done) return;
-      done = true;
-      initAudio().then((audio) => {
-        if (audio && gameRef.current?.phase !== "playing") audio.menuMusic();
-      });
-    };
-    window.addEventListener("pointerdown", warm, { once: true });
-    window.addEventListener("keydown", warm, { once: true });
+    initAudio().then((audio) => {
+      if (audio && gameRef.current?.phase !== "playing") audio.menuMusic();
+    });
+
+    const nudge = () => audioRef.current?.resume();
+    window.addEventListener("pointerdown", nudge);
+    window.addEventListener("keydown", nudge);
     return () => {
-      window.removeEventListener("pointerdown", warm);
-      window.removeEventListener("keydown", warm);
+      window.removeEventListener("pointerdown", nudge);
+      window.removeEventListener("keydown", nudge);
     };
   }, [initAudio]);
 
